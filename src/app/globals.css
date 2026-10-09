@@ -1,0 +1,55 @@
+@import 'leaflet/dist/leaflet.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --bg: #07090f;
+    --surface: #111827;
+    --surface2: #1a2233;
+    --border: #1f2d45;
+    --border2: #2a3d5a;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background-color: var(--bg);
+    color: #e8edf5;
+  }
+
+  ::-webkit-scrollbar { width: 5px; height: 5px; }
+  ::-webkit-scrollbar-track { background: var(--surface2); }
+  ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+}
+
+@layer components {
+  .card {
+    @apply bg-[#111827] border border-[#1f2d45] rounded-xl p-5;
+  }
+  .card-title {
+    @apply text-xs font-semibold text-[#8a9bb5] uppercase tracking-wider mb-4;
+  }
+  .btn-primary {
+    @apply bg-brand-red hover:opacity-90 text-white font-semibold px-4 py-2 rounded-lg text-sm transition-opacity;
+  }
+  .btn-ghost {
+    @apply bg-[#1a2233] hover:bg-[#1f2d45] text-[#e8edf5] border border-[#1f2d45] font-medium px-4 py-2 rounded-lg text-sm transition-colors;
+  }
+  .kpi-card {
+    @apply card relative overflow-hidden;
+  }
+  .input {
+    @apply bg-[#1a2233] border border-[#1f2d45] text-white placeholder-[#4a5a70] rounded-lg px-3 py-2 text-sm w-full outline-none focus:border-brand-red transition-colors;
+  }
+  .badge {
+    @apply inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-full font-mono;
+  }
+  .badge-red  { @apply bg-red-500/10 text-red-400 border border-red-500/20; }
+  .badge-grn  { @apply bg-emerald-500/10 text-emerald-400 border border-emerald-500/20; }
+  .badge-gold { @apply bg-amber-500/10 text-amber-400 border border-amber-500/20; }
+  .badge-blue { @apply bg-blue-500/10 text-blue-400 border border-blue-500/20; }
+  .badge-dim  { @apply bg-white/5 text-[#8a9bb5] border border-[#1f2d45]; }
+}
