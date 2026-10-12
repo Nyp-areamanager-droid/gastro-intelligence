@@ -11,7 +11,9 @@
     "type-check": "tsc --noEmit",
     "db:push": "supabase db push",
     "db:reset": "supabase db reset",
-    "db:seed": "npx tsx supabase/seed/seed.ts"
+    "db:seed": "npx tsx supabase/seed/seed.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.0.5",
@@ -52,6 +54,8 @@
     "postcss": "^8.4.38",
     "tailwindcss": "^3.4.3",
     "tsx": "^4.11.0",
-    "typescript": "^5.4.5"
+    "typescript": "^5.4.5",
+    "vite": "^8.3.4",
+    "vitest": "^5.0.4"
   }
 }
