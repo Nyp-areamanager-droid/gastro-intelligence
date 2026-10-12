@@ -11,7 +11,8 @@ export default function MarketingPage() {
     async function load() {
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) return
-      const { data: m } = await supabase.from('company_users').select('company_id').eq('user_id', user.id).single()
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { data: m } = await (supabase.from('company_users') as any).select('company_id').eq('user_id', user.id).single()
       if (!m) return
       const { data } = await supabase.from('marketing_actions').select('*').eq('company_id', m.company_id).order('priority')
       setActions(data || [])

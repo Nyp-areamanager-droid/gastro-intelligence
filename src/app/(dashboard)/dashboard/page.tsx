@@ -21,7 +21,8 @@ export default function DashboardPage() {
     async function load() {
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) return
-      const { data: membership } = await supabase.from('company_users').select('company_id').eq('user_id', user.id).single()
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { data: membership } = await (supabase.from('company_users') as any).select('company_id').eq('user_id', user.id).single()
       if (!membership) return
       const companyId = membership.company_id
       const { data: customers } = await supabase.from('customers').select('*').eq('company_id', companyId)

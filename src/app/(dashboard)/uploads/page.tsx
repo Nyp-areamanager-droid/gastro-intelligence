@@ -33,7 +33,7 @@ export default function UploadsPage() {
       if (!user) throw new Error('Nicht eingeloggt')
 
       const { data: membership } = await supabase
-        .from('company_users').select('company_id').eq('user_id', user.id).single()
+(supabase.from('company_users') as any).select('company_id').eq('user_id', user.id).single()
       if (!membership) throw new Error('Kein Unternehmen gefunden')
 
       const formData = new FormData()
