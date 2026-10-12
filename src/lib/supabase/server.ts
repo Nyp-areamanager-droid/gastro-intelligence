@@ -1,4 +1,5 @@
 import { createServerClient } from '@supabase/ssr'
+import { createClient as createSupabaseClient } from '@supabase/supabase-js'
 import { cookies } from 'next/headers'
 import type { Database } from './database.types'
 
@@ -22,11 +23,10 @@ export function createServerSupabaseClient() {
 }
 
 export function createServiceClient() {
-  const { createClient } = require('@supabase/supabase-js')
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY
   if (!url || !key) {
     throw new Error('Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY environment variable')
   }
-  return createClient<Database>(url, key, { auth: { autoRefreshToken: false, persistSession: false } })
+  return createSupabaseClient<Database>(url, key, { auth: { autoRefreshToken: false, persistSession: false } })
 }
