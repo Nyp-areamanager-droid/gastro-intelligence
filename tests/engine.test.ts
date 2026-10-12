@@ -253,12 +253,8 @@ describe('parseAndCleanRows', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('computeRFM', () => {
-  // Datumsangaben relativ zu heute (Test läuft zeitunabhängig)
-  function daysAgo(n: number): string {
-    const d = new Date()
-    d.setDate(d.getDate() - n)
-    return d.toISOString().split('T')[0]
-  }
+  // Festes Referenzdatum → Tests sind vollständig zeitunabhängig und reproduzierbar
+  const REF = new Date('2024-12-01')
 
   function makeCustomer(orders: number, revenue: number, lastOrderDate: string) {
     return {
@@ -272,19 +268,21 @@ describe('computeRFM', () => {
 
   // Segmentnamen der Engine: 'vip' | 'loyal' | 'potential' | 'at_risk' | 'lost' | 'new'
   it('weist vip-Segment bei sehr hohen Werten zu', () => {
-    // rScore >= 4 (letzte Bestellung < 30 Tage), fScore >= 4 (>= 20 Bestellungen), mScore >= 4 (>= 200 €)
-    const rows = computeRFM([makeCustomer(25, 500, daysAgo(10))])
+    // REF=2024-12-01; letzte Bestellung 2024-11-20 → 11 Tage → rScore=5
+    // 25 Bestellungen → fScore=5; 500 € → mScore=5 → vip
+    const rows = computeRFM([makeCustomer(25, 500, '2024-11-20')], REF)
     expect(rows[0].rfm_segment).toBe('vip')
   })
 
   it('weist lost-Segment bei alten, wenigen Bestellungen zu', () => {
-    // rScore === 1 (über 180 Tage her)
-    const rows = computeRFM([makeCustomer(1, 15, daysAgo(400))])
+    // REF=2024-12-01; letzte Bestellung 2023-01-01 → 334 Tage → rScore=1 → lost
+    const rows = computeRFM([makeCustomer(1, 15, '2023-01-01')], REF)
     expect(rows[0].rfm_segment).toBe('lost')
   })
 
   it('berechnet RFM-Score als Zahl zwischen 1 und 5', () => {
-    const rows = computeRFM([makeCustomer(5, 80, daysAgo(60))])
+    // REF=2024-12-01; letzte Bestellung 2024-10-01 → 61 Tage → rScore=4
+    const rows = computeRFM([makeCustomer(5, 80, '2024-10-01')], REF)
     expect(rows[0].rfm_score).toBeGreaterThanOrEqual(1)
     expect(rows[0].rfm_score).toBeLessThanOrEqual(5)
   })
@@ -292,11 +290,11 @@ describe('computeRFM', () => {
   it('setzt rfm_segment bei allen Kunden (echte Engine-Werte)', () => {
     const VALID_SEGMENTS = ['vip', 'loyal', 'potential', 'at_risk', 'lost', 'new']
     const input = [
-      makeCustomer(1, 15, daysAgo(400)),
-      makeCustomer(5, 80, daysAgo(80)),
-      makeCustomer(25, 500, daysAgo(10)),
+      makeCustomer(1, 15, '2023-01-01'),   // lost
+      makeCustomer(5, 80, '2024-09-01'),   // at_risk oder loyal
+      makeCustomer(25, 500, '2024-11-20'), // vip
     ]
-    const result = computeRFM(input)
+    const result = computeRFM(input, REF)
     result.forEach(r => {
       expect(r.rfm_segment).toBeDefined()
       expect(VALID_SEGMENTS).toContain(r.rfm_segment)

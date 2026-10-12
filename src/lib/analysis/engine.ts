@@ -221,8 +221,8 @@ function parseDateString(raw: string): string | undefined {
 
 // ── RFM Analyse ───────────────────────────────────────────────────────────────
 
-export function computeRFM(rows: ParsedCustomerRow[]): ParsedCustomerRow[] {
-  const today = new Date()
+export function computeRFM(rows: ParsedCustomerRow[], refDate?: Date): ParsedCustomerRow[] {
+  const today = refDate ?? new Date()
 
   return rows.map(row => {
     const recencyDays = row.last_order_date
