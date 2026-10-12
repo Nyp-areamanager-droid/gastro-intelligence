@@ -41,3 +41,6 @@ Thumbs.db
 
 # Local helper scripts containing secrets - never commit
 *.bat
+
+# Supabase CLI temp files
+supabase/.temp/
