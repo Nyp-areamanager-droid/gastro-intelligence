@@ -196,16 +196,20 @@ export async function POST(req: NextRequest) {
 
       // Population in postal_codes schreiben falls noch nicht vorhanden
       if (!plzData?.population && population) {
-        await supabase.from('postal_codes').upsert({
-          postal_code: plz,
-          city: plzRows[0]?.city || plz,
-          population,
-          households,
-          population_year: 2022,
-          data_source: 'census',
-          trust_level: 'official',
-          last_fetched_at: new Date().toISOString(),
-        }, { onConflict: 'postal_code' }).catch(() => {})
+        try {
+          await supabase.from('postal_codes').upsert({
+            postal_code: plz,
+            city: plzRows[0]?.city || plz,
+            population,
+            households,
+            population_year: 2022,
+            data_source: 'census',
+            trust_level: 'official',
+            last_fetched_at: new Date().toISOString(),
+          }, { onConflict: 'postal_code' })
+        } catch {
+          // Nicht-kritisch: Bevölkerungsdaten konnten nicht gecacht werden
+        }
       }
 
       const analysis = analyzePLZ(

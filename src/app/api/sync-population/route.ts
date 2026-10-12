@@ -21,7 +21,7 @@ const CENSUS: Record<string, { pop: number; hh: number }> = {
   '51147':{pop:18100,hh:10100},'51149':{pop:21600,hh:12100},
   // 50226 = Frechen
   '50226':{pop:21000,hh:11200},'50321':{pop:23400,hh:12800},'50354':{pop:24100,hh:13200},
-  '50374':{pop:18600,hh:10200},'50389':{pop:31200,hh:16800},'50667':{pop:8950,hh:5200},
+  '50374':{pop:18600,hh:10200},'50389':{pop:31200,hh:16800},
 }
 
 export async function POST() {
@@ -56,16 +56,20 @@ export async function POST() {
       if (!updateError) updated++
 
       // Auch postal_codes updaten
-      await supabase.from('postal_codes').upsert({
-        postal_code: row.postal_code,
-        city: row.postal_code,
-        population: c.pop,
-        households: c.hh,
-        population_year: 2022,
-        data_source: 'census',
-        trust_level: 'official',
-        last_fetched_at: new Date().toISOString(),
-      }, { onConflict: 'postal_code' }).catch(() => {})
+      try {
+        await supabase.from('postal_codes').upsert({
+          postal_code: row.postal_code,
+          city: row.postal_code,
+          population: c.pop,
+          households: c.hh,
+          population_year: 2022,
+          data_source: 'census',
+          trust_level: 'official',
+          last_fetched_at: new Date().toISOString(),
+        }, { onConflict: 'postal_code' })
+      } catch {
+        // Nicht-kritisch: PLZ-Bevölkerungsdaten konnten nicht gecacht werden
+      }
     }
 
     return NextResponse.json({ 
