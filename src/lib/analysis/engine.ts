@@ -65,7 +65,7 @@ export function detectColumns(headers: string[]): Record<string, string> {
   const rules: [string, string[]][] = [
     ['phone',         ['telefon','phone','tel','mobile','handy','nummer']],
     ['first_name',    ['vorname','firstname','first name','given name']],
-    ['last_name',     ['nachname','lastname','last name','name','surname']],
+    ['last_name',     ['nachname','lastname','last name','surname','familienname']],
     ['street',        ['straße','strasse','street','adresse','adress','road']],
     ['house_number',  ['hausnummer','hnr','house number','nr.','number']],
     ['postal_code',   ['plz','postleitzahl','zip','postal','postcode']],
@@ -80,11 +80,13 @@ export function detectColumns(headers: string[]): Record<string, string> {
     ['is_vip',        ['vip','premium','loyal','stammkunde']],
   ]
 
+  const usedColumns = new Set<string>()
   for (const h of headers) {
     const l = lower(h)
     for (const [field, keywords] of rules) {
-      if (!map[field] && keywords.some(k => l.includes(k))) {
+      if (!map[field] && !usedColumns.has(h) && keywords.some(k => l.includes(k))) {
         map[field] = h
+        usedColumns.add(h)
       }
     }
   }
