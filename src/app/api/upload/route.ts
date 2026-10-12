@@ -250,7 +250,8 @@ export async function POST(req: NextRequest) {
           one_time_buyers: analysis.one_time_buyers,
           repeat_customers: analysis.repeat_customers,
           vip_customers: analysis.vip_customers,
-          potential_scenarios: analysis.potential_scenarios,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          potential_scenarios: analysis.potential_scenarios as unknown as any,
           top_recommendations: analysis.warnings,
         })
         .select()
@@ -295,7 +296,6 @@ export async function POST(req: NextRequest) {
         recs.map(r => ({
           company_id: companyId,
           store_id: storeId || null,
-          upload_id: upload.id,
           action_type: r.action_type,
           title: r.title,
           description: r.description,

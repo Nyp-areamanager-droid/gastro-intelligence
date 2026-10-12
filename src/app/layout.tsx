@@ -1,10 +1,5 @@
 import type { Metadata } from 'next'
-import { DM_Sans, DM_Mono, Syne } from 'next/font/google'
 import './globals.css'
-
-const dmSans = DM_Sans({ subsets: ['latin'], variable: '--font-dm-sans' })
-const dmMono = DM_Mono({ subsets: ['latin'], weight: ['400','500'], variable: '--font-dm-mono' })
-const syne   = Syne({ subsets: ['latin'], weight: ['700','800'], variable: '--font-syne' })
 
 export const metadata: Metadata = {
   title: 'Gastro Intelligence Platform',
@@ -14,7 +9,15 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="de" className="dark">
-      <body className={`${dmSans.variable} ${dmMono.variable} ${syne.variable} font-sans bg-brand-dark text-white antialiased`}>
+      <head>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
+        <link
+          href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@100..1000&family=DM+Mono:wght@400;500&family=Syne:wght@700;800&display=swap"
+          rel="stylesheet"
+        />
+      </head>
+      <body className="font-sans bg-brand-dark text-white antialiased">
         {children}
       </body>
     </html>

@@ -6,6 +6,9 @@
 
 @layer base {
   :root {
+    --font-dm-sans: 'DM Sans', system-ui, sans-serif;
+    --font-dm-mono: 'DM Mono', ui-monospace, monospace;
+    --font-syne: 'Syne', system-ui, sans-serif;
     --bg: #07090f;
     --surface: #111827;
     --surface2: #1a2233;

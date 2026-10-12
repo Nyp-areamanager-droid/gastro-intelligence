@@ -17,7 +17,7 @@ export default function StreetsPage() {
   const [streets, setStreets] = useState<StreetRow[]>([])
   const [filter, setFilter] = useState<'all'|'none'|'weak'|'strong'>('all')
   const [search, setSearch] = useState('')
-  const [info, setInfo] = useState<{ population: number|null, customers: number, orders: number, streets_total: number, streets_with_orders: number } | null>(null)
+  const [info, setInfo] = useState<{ postal_code: string|null, population: number|null, customer_count: number|null, order_count: number|null, streets_total: number|null, streets_with_orders: number|null } | null>(null)
   const supabase = createClient()
 
   useEffect(() => {
@@ -57,7 +57,7 @@ export default function StreetsPage() {
     }))
     setStreets([...withOrders, ...withoutOrders])
     if (data.analysis) {
-      setInfo({ population: data.analysis.population, customers: data.analysis.customer_count, orders: data.analysis.order_count, streets_total: data.analysis.streets_total, streets_with_orders: data.analysis.streets_with_orders })
+      setInfo({ postal_code: selectedPLZ, population: data.analysis.population, customer_count: data.analysis.customer_count, order_count: data.analysis.order_count, streets_total: data.analysis.streets_total, streets_with_orders: data.analysis.streets_with_orders })
     }
     setLoading(false)
   }
@@ -72,7 +72,7 @@ export default function StreetsPage() {
 
   const noOrders = streets.filter(s => s.orders === 0).length
   const withOrders = streets.filter(s => s.orders > 0).length
-  const mktPct = info?.population && info.customers ? (info.customers / info.population * 100) : null
+  const mktPct = info?.population && info.customer_count ? (info.customer_count / info.population * 100) : null
 
   const classColors: Record<string,string> = { A:'#00d084', B:'#33e8a0', C:'#f5a623', D:'#2e86c1', E:'#e63027' }
   const classLabels: Record<string,string> = { A:'Sehr aktiv', B:'Aktiv', C:'Mittel', D:'Schwach', E:'Kein Kontakt' }
@@ -102,12 +102,12 @@ export default function StreetsPage() {
       {info && (
         <div style={{ display:'grid', gridTemplateColumns:'repeat(6,1fr)', gap:'12px', marginBottom:'24px' }}>
           {[
-            { label:'Straßen total', value: streets.length || info.streets_total, color:'#2e86c1' },
+            { label:'Straßen total', value: streets.length || info.streets_total || 0, color:'#2e86c1' },
             { label:'✅ Mit Bestellungen', value: withOrders, color:'#00d084' },
             { label:'❌ Ohne Kontakt', value: noOrders, color:'#e63027' },
             { label:'👥 Einwohner', value: info.population ? info.population.toLocaleString('de-DE') : '—', color:'#f5a623' },
             { label:'📊 % bestellen bei uns', value: mktPct ? mktPct.toFixed(2)+'%' : '—', color: mktPct && mktPct>2?'#00d084':'#e63027' },
-            { label:'🔴 Nicht erreicht', value: info.population && info.customers ? (info.population-info.customers).toLocaleString('de-DE') : '—', color:'#f87171' },
+            { label:'🔴 Nicht erreicht', value: info.population && info.customer_count ? (info.population-info.customer_count).toLocaleString('de-DE') : '—', color:'#f87171' },
           ].map((k,i) => (
             <div key={i} style={{ background:'#111827', border:'1px solid #1f2d45', borderTop:`3px solid ${k.color}`, borderRadius:'10px', padding:'16px' }}>
               <div style={{ fontSize:'10px', color:'#8a9bb5', textTransform:'uppercase', letterSpacing:'0.7px', marginBottom:'8px' }}>{k.label}</div>

@@ -75,7 +75,6 @@ export async function GET(req: NextRequest) {
     data_source: 'osm',
     status: osmResults.length > 0 ? 'success' : 'partial',
     records_fetched: osmResults.length,
-    records_inserted: poiRecords.length,
     duration_ms: duration,
   })
 

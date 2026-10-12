@@ -104,7 +104,6 @@ export async function GET(req: NextRequest) {
     data_source: 'openplz',
     status: 'success',
     records_fetched: streets.length,
-    records_inserted: streets.length,
     duration_ms: duration,
   })
 
