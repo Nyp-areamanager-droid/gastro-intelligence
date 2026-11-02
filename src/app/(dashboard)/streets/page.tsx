@@ -1,6 +1,13 @@
 'use client'
 import { useEffect, useState } from 'react'
+import dynamic from 'next/dynamic'
 import { createClient } from '@/lib/supabase/client'
+
+// Leaflet nur client-seitig laden (kein SSR)
+const AnalysisMap = dynamic(
+  () => import('@/components/maps/AnalysisMap').then(m => ({ default: m.AnalysisMap })),
+  { ssr: false, loading: () => <div style={{ height:'400px', background:'#111827', borderRadius:'12px', display:'flex', alignItems:'center', justifyContent:'center', color:'#4a5a70' }}>Karte lädt…</div> }
+)
 
 interface StreetRow {
   name: string
@@ -116,6 +123,19 @@ export default function StreetsPage() {
           ))}
         </div>
       )}
+
+      {/* Interaktive Straßenkarte */}
+      <div style={{ background:'#111827', border:'1px solid #1f2d45', borderRadius:'12px', padding:'4px', marginBottom:'24px', height:'420px' }}>
+        <AnalysisMap
+          center={[50.958, 6.973]}
+          zoom={12}
+          showStreets={false}
+          showCompetitors={false}
+          showB2B={false}
+          showStreetLayer={true}
+          showPlzBoundaries={true}
+        />
+      </div>
 
       {/* Filter + Suche */}
       <div style={{ background:'#111827', border:'1px solid #1f2d45', borderRadius:'12px', padding:'20px' }}>

@@ -21,6 +21,20 @@ interface MapProps {
   showStreets?: boolean
   showCompetitors?: boolean
   showB2B?: boolean
+  showStreetLayer?: boolean   // Neue Option: Straßen-GeoJSON einblenden
+  showPlzBoundaries?: boolean // Neue Option: PLZ-Grenzen einblenden
+}
+
+// Straßenfarbe je highway-Typ (identisch mit Vorschaukarte)
+function streetColor(highway: string): string {
+  if (highway === 'motorway' || highway === 'motorway_link') return '#f97316'
+  if (highway === 'trunk' || highway === 'trunk_link') return '#f59e0b'
+  if (highway === 'primary' || highway === 'primary_link') return '#eab308'
+  if (highway === 'secondary' || highway === 'secondary_link') return '#3b82f6'
+  if (highway === 'tertiary' || highway === 'tertiary_link') return '#6366f1'
+  if (highway === 'residential') return '#4b6fa8'
+  if (highway === 'service') return '#374f70'
+  return '#334155'
 }
 
 const CATEGORY_COLORS: Record<string, string> = {
@@ -58,6 +72,8 @@ export function AnalysisMap({
   showStreets = true,
   showCompetitors = true,
   showB2B = true,
+  showStreetLayer = false,
+  showPlzBoundaries = false,
 }: MapProps) {
   const mapRef = useRef<HTMLDivElement>(null)
   const mapInstanceRef = useRef<unknown>(null)
@@ -126,6 +142,77 @@ export function AnalysisMap({
         } catch {}
       }
 
+      // ── GeoJSON-Straßen und PLZ-Grenzen (Köln Live-Test) ──────────────
+      if (showStreetLayer || showPlzBoundaries) {
+        try {
+          const geoRes = await fetch('/data/koeln_streets.geojson')
+          if (geoRes.ok) {
+            const geoData = await geoRes.json()
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            L.geoJSON(geoData as any, {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              filter: (feature: any) => {
+                const t = feature.geometry?.type
+                const status = feature.properties?.status
+                if (t === 'MultiLineString' || t === 'LineString') return !!showStreetLayer
+                if (t === 'Polygon' || t === 'MultiPolygon') {
+                  // Incomplete ohne Geodaten überspringen
+                  if (status === 'incomplete' && !feature.geometry) return false
+                  return !!showPlzBoundaries
+                }
+                return false
+              },
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              style: (feature: any) => {
+                const t = feature.geometry?.type
+                const status = feature.properties?.status
+                if (t === 'MultiLineString' || t === 'LineString') {
+                  return {
+                    color: streetColor(feature.properties?.highway || ''),
+                    weight: 1.5,
+                    opacity: 0.85,
+                  }
+                }
+                // PLZ-Grenzen
+                if (status === 'incomplete') {
+                  return { color: '#6b7280', weight: 1.5, opacity: 0.6, fillOpacity: 0.08, dashArray: '4 4' }
+                }
+                return { color: '#22d3ee', weight: 1.5, opacity: 0.7, fillOpacity: 0.04 }
+              },
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              onEachFeature: (feature: any, layer: any) => {
+                const p = feature.properties || {}
+                const t = feature.geometry?.type
+                if (t === 'MultiLineString' || t === 'LineString') {
+                  // Straße anklicken → Popup
+                  const name = p.name || '(unbenannt)'
+                  const hw   = p.highway || '—'
+                  const plzVal = p.plz || '—'
+                  layer.bindPopup(
+                    `<b style="color:#111">${name}</b><br>` +
+                    `<span style="color:#555">PLZ: ${plzVal}</span><br>` +
+                    `<span style="color:#555">Typ: ${hw}</span>`,
+                    { maxWidth: 220 }
+                  )
+                  layer.on('mouseover', () => layer.setStyle({ weight: 3, opacity: 1 }))
+                  layer.on('mouseout',  () => layer.setStyle({ weight: 1.5, opacity: 0.85 }))
+                } else {
+                  // PLZ-Grenze
+                  const status = p.status || 'partial'
+                  const label = status === 'incomplete'
+                    ? `⚠️ PLZ ${p.plz} – unvollständig (Overpass-Ausfall)`
+                    : `PLZ ${p.plz} · ${p.street_count ?? '?'} Straßen`
+                  layer.bindPopup(`<b style="color:#111">${label}</b>`, { maxWidth: 220 })
+                }
+              },
+            }).addTo(map)
+          }
+        } catch {
+          // GeoJSON-Fehler still ignorieren – Karte bleibt nutzbar
+        }
+      }
+      // ── Ende GeoJSON ───────────────────────────────────────────────────
+
       // Übergebene Marker
       for (const m of markers) {
         const divIcon = L.divIcon({
@@ -187,6 +274,29 @@ export function AnalysisMap({
             <span className="text-[#8a9bb5]">{item.label}</span>
           </div>
         ))}
+        {(showStreetLayer || showPlzBoundaries) && (
+          <>
+            <div className="border-t border-[#1f2d45] my-2" />
+            {showPlzBoundaries && (
+              <>
+                <div className="flex items-center gap-2 mb-1">
+                  <div className="w-3 h-1 rounded" style={{ background: '#22d3ee' }} />
+                  <span className="text-[#8a9bb5]">PLZ (erfasst)</span>
+                </div>
+                <div className="flex items-center gap-2 mb-1">
+                  <div className="w-3 h-1 rounded border border-dashed border-gray-500" style={{ background: 'transparent' }} />
+                  <span className="text-[#8a9bb5]">PLZ (unvollständig)</span>
+                </div>
+              </>
+            )}
+            {showStreetLayer && (
+              <div className="flex items-center gap-2 mb-1">
+                <div className="w-3 h-1 rounded" style={{ background: '#4b6fa8' }} />
+                <span className="text-[#8a9bb5]">Straßen</span>
+              </div>
+            )}
+          </>
+        )}
       </div>
 
       {/* POI-Zusammenfassung */}
