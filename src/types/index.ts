@@ -393,6 +393,8 @@ export interface ColumnMapping {
   store?: string
   late_deliveries?: string
   is_vip?: string
+  /** Spalte mit Anzahl eindeutiger Kunden (nur bei aggregierten CSV-Exporten) */
+  customer_count?: string
 }
 
 export interface ParsedCustomerRow {
@@ -417,6 +419,11 @@ export interface ParsedCustomerRow {
   rfm_segment?: RFMSegment
   _row_index: number
   _errors: string[]
+  /** Gesetzt wenn die Zeile bereits aggregierte Straßendaten enthält
+   *  (kein Einzelkunde, sondern Summe mehrerer Kunden je Straße). */
+  _is_aggregated?: boolean
+  /** Anzahl eindeutiger Kunden laut CSV-Spalte (nur bei _is_aggregated=true) */
+  _aggregated_customer_count?: number
 }
 
 export interface ImportSummary {

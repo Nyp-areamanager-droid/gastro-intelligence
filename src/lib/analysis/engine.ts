@@ -63,7 +63,7 @@ export function detectColumns(headers: string[]): Record<string, string> {
   const lower = (h: string) => h.toLowerCase().trim()
 
   const rules: [string, string[]][] = [
-    ['phone',         ['telefon','phone','tel','mobile','handy','nummer']],
+    ['phone',         ['telefon','phone','mobile','handy','rufnummer','mobilnummer','tel.']],
     ['first_name',    ['vorname','firstname','first name','given name']],
     ['last_name',     ['nachname','lastname','last name','surname','familienname']],
     ['street',        ['straße','strasse','street','adresse','adress','road']],
@@ -78,6 +78,8 @@ export function detectColumns(headers: string[]): Record<string, string> {
     ['store',         ['filiale','store','standort','branch','niederlassung']],
     ['late_deliveries',['verspät','late','eta','lieferzeit']],
     ['is_vip',        ['vip','premium','loyal','stammkunde']],
+    // Aggregierte CSV: Anzahl eindeutiger Kunden je Straße/PLZ
+    ['customer_count',['kunden','kundenanzahl','unique kunden','unique customers','anzahl kunden','eindeutige kunden']],
   ]
 
   const usedColumns = new Set<string>()
@@ -176,13 +178,30 @@ export function parseAndCleanRows(
     const vipRaw = get('is_vip').toLowerCase()
     parsed.is_vip = ['true','1','yes','ja','vip','x'].includes(vipRaw)
 
-    // Duplikat-Check: phone + normalized_street + plz
-    const dupKey = `${parsed.phone_normalized || ''}|${parsed.street_normalized || ''}|${parsed.postal_code}`
-    if (seen.has(dupKey) && parsed.phone_normalized) {
-      duplicates++
-      continue
+    // ── Aggregierter Modus erkennen ───────────────────────────────────────────
+    // Wenn eine customer_count-Spalte vorhanden ist, handelt es sich um eine
+    // voraggregierte CSV (Straße → n Kunden, m Bestellungen). In diesem Modus
+    // gilt jede Zeile als genau ein Aggregat-Eintrag, KEIN Einzelkunde.
+    const customerCountRaw = columnMapping['customer_count']
+      ? parseFloat(get('customer_count').replace(',', '.'))
+      : NaN
+    if (!isNaN(customerCountRaw) && customerCountRaw >= 1) {
+      parsed._is_aggregated = true
+      parsed._aggregated_customer_count = Math.round(customerCountRaw)
     }
-    seen.add(dupKey)
+
+    // Duplikat-Check: nur für Einzelkunden (phone + normalized_street + plz).
+    // Aggregierte Zeilen werden nie als Duplikate gewertet — sie kommen aus
+    // einem bereits deduplizierten Export und werden in analyzeStreets summiert.
+    if (!parsed._is_aggregated) {
+      const dupKey = `${parsed.phone_normalized || ''}|${parsed.street_normalized || ''}|${parsed.postal_code}`
+      if (seen.has(dupKey) && parsed.phone_normalized) {
+        duplicates++
+        continue
+      }
+      seen.add(dupKey)
+    }
+
     result.push(parsed)
   }
 
@@ -280,7 +299,11 @@ export function analyzePLZ(
   households: number | null,
 ): PLZAnalysisResult {
   const postalCode = rows[0]?.postal_code || ''
-  const customerCount = rows.length
+  // Aggregierte CSV: _aggregated_customer_count summieren; sonst Anzahl Zeilen
+  const isAggregated = rows.some(r => r._is_aggregated)
+  const customerCount = isAggregated
+    ? rows.reduce((s, r) => s + (r._aggregated_customer_count ?? 1), 0)
+    : rows.length
   const orderCount = rows.reduce((s, r) => s + r.total_orders, 0)
   const revenue = rows.reduce((s, r) => s + r.total_revenue, 0)
   const avgOrderValue = orderCount > 0 ? revenue / orderCount : 0
@@ -379,21 +402,32 @@ export function analyzeStreets(
   for (const [street, group] of streetGroups) {
     const orderCount = group.reduce((s, r) => s + r.total_orders, 0)
     const revenue = group.reduce((s, r) => s + r.total_revenue, 0)
-    const avgVal = orderCount > 0 ? revenue / orderCount : 0
-    const bpk = group.length > 0 ? orderCount / group.length : 0
     const isOfficial = officialStreets.some(s => normalizeStreetName(s) === normalizeStreetName(street))
+
+    // ── Kundenzahl: aggregiert vs. Einzelkunden ──────────────────────────────
+    // Aggregierte CSV: Jede Zeile liefert _aggregated_customer_count (die Anzahl
+    // eindeutiger Kunden laut Export). Mehrere Zeilen zur selben Straße werden
+    // addiert — das ist nur erlaubt, weil der Export bereits dedupliziert ist.
+    // Einzelkunden-CSV: group.length = Anzahl der Datensätze = Kundenzahl.
+    const isAggregated = group.some(r => r._is_aggregated)
+    const customerCount = isAggregated
+      ? group.reduce((s, r) => s + (r._aggregated_customer_count ?? 1), 0)
+      : group.length
+
+    const avgVal = orderCount > 0 ? revenue / orderCount : 0
+    const bpk = customerCount > 0 ? orderCount / customerCount : 0
 
     results.push({
       street_name: street,
       postal_code: group[0]?.postal_code || '',
-      customer_count: group.length,
+      customer_count: customerCount,
       order_count: orderCount,
       revenue: Math.round(revenue * 100) / 100,
       avg_order_value: Math.round(avgVal * 100) / 100,
       orders_per_customer: Math.round(bpk * 100) / 100,
-      street_class: classifyStreet(group.length, orderCount),
+      street_class: classifyStreet(customerCount, orderCount),
       is_in_official_list: isOfficial,
-      recommendation: getStreetRecommendation(group.length, orderCount),
+      recommendation: getStreetRecommendation(customerCount, orderCount),
     })
   }
 
