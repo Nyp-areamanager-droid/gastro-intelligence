@@ -4,7 +4,7 @@ import { createServiceClient } from '@/lib/supabase/server'
 import {
   detectColumns, parseAndCleanRows, computeRFM,
   computeDashboardKPIs, generateAlerts, generateRecommendations,
-  analyzeStreets, analyzePLZ
+  analyzeStreets, analyzePLZ, normalizeStreetName
 } from '@/lib/analysis/engine'
 import { DataProviderOrchestrator, censusProvider } from '@/lib/providers'
 import { getPopulation } from '@/lib/census'
@@ -173,7 +173,7 @@ export async function POST(req: NextRequest) {
           const streetRecords = officialStreets.map(name => ({
             postal_code: plz,
             name,
-            name_normalized: name.toLowerCase().replace(/\s+/g,'').replace(/straße/g,'str'),
+            name_normalized: normalizeStreetName(name),
             data_source: 'openplz' as const,
             last_fetched_at: new Date().toISOString(),
           }))
@@ -264,7 +264,7 @@ export async function POST(req: NextRequest) {
           company_id: companyId,
           postal_code: plz,
           street_name: s.street_name,
-          street_name_normalized: s.street_name.toLowerCase().replace(/\s+/g,'').replace(/straße/g,'str'),
+          street_name_normalized: normalizeStreetName(s.street_name),
           customer_count: s.customer_count,
           order_count: s.order_count,
           revenue: s.revenue,

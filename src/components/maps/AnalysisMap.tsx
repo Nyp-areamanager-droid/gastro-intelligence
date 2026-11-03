@@ -13,16 +13,53 @@ interface MapMarkerData {
   popup?: string
 }
 
+interface StreetAnalyticsEntry {
+  street_name: string
+  customer_count: number
+  order_count: number
+  revenue: number
+  avg_order_value: number
+  orders_per_customer: number
+  street_class: 'A' | 'B' | 'C' | 'D' | 'E' | null
+  is_in_official_list: boolean
+}
+
 interface MapProps {
   center?: [number, number]
   zoom?: number
   markers?: MapMarkerData[]
   plz?: string
+  companyId?: string          // Optional: aktiviert street_analytics-Färbung
   showStreets?: boolean
   showCompetitors?: boolean
   showB2B?: boolean
   showStreetLayer?: boolean   // Neue Option: Straßen-GeoJSON einblenden
   showPlzBoundaries?: boolean // Neue Option: PLZ-Grenzen einblenden
+}
+
+/**
+ * Normalisiert einen Straßennamen für den Lookup in street_analytics.
+ * Muss identisch mit engine.ts normalizeStreetName() sein.
+ */
+function normalizeForLookup(raw: string): string {
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/\s+\d+\s*[a-z]?\s*(-\s*\d+\s*[a-z]?)?\s*$/i, '') // Hausnummer entfernen
+    .replace(/straße|strasse/g, 'str')
+    .replace(/gasse\b/g, 'g')
+    .replace(/\bplatz\b/g, 'pl')
+    .replace(/[.\-\s]+/g, '')
+    .trim()
+}
+
+/** Farbe für Straßenklasse A–E aus street_analytics */
+function classColor(cls: string | null): string | null {
+  if (cls === 'A' || cls === 'B') return '#00d084'  // stark
+  if (cls === 'C') return '#f5a623'                  // mittel
+  if (cls === 'D') return '#e63027'                  // schwach
+  if (cls === 'E') return '#4a5a70'                  // kein Kontakt
+  return null
 }
 
 // Straßenfarbe je highway-Typ (identisch mit Vorschaukarte)
@@ -69,6 +106,7 @@ export function AnalysisMap({
   zoom = 13,
   markers = [],
   plz,
+  companyId,
   showStreets = true,
   showCompetitors = true,
   showB2B = true,
@@ -79,7 +117,7 @@ export function AnalysisMap({
   const mapInstanceRef = useRef<unknown>(null)
   const [loading, setLoading] = useState(true)
   const [poiData, setPoiData] = useState<Record<string, unknown>[]>([])
-  const [streetData, setStreetData] = useState<Record<string, unknown>[]>([])
+  const [streetAnalytics, setStreetAnalytics] = useState<Map<string, StreetAnalyticsEntry>>(new Map())
   const [error, setError] = useState<string>('')
 
   useEffect(() => {
@@ -106,6 +144,23 @@ export function AnalysisMap({
         attribution: '© <a href="https://openstreetmap.org">OpenStreetMap</a>',
         maxZoom: 19,
       }).addTo(map)
+
+      // street_analytics laden (wenn plz + showStreetLayer aktiv)
+      if (plz && showStreetLayer) {
+        try {
+          const saRes = await fetch(`/api/analysis/streets?plz=${plz}`)
+          if (saRes.ok) {
+            const saData = await saRes.json()
+            const lookup = new Map<string, StreetAnalyticsEntry>()
+            for (const s of (saData.streets || []) as StreetAnalyticsEntry[]) {
+              lookup.set(normalizeForLookup(s.street_name), s)
+            }
+            setStreetAnalytics(lookup)
+          }
+        } catch {
+          // street_analytics-Fehler still ignorieren – Karte bleibt nutzbar
+        }
+      }
 
       // POIs laden
       if (plz) {
@@ -167,10 +222,16 @@ export function AnalysisMap({
                 const t = feature.geometry?.type
                 const status = feature.properties?.status
                 if (t === 'MultiLineString' || t === 'LineString') {
+                  // Straße in street_analytics? → Klassen-Farbe verwenden
+                  const name = feature.properties?.name || ''
+                  const analyticsEntry = streetAnalytics.get(normalizeForLookup(name))
+                  const color = (analyticsEntry && classColor(analyticsEntry.street_class))
+                    || streetColor(feature.properties?.highway || '')
+                  const hasAnalytics = !!analyticsEntry
                   return {
-                    color: streetColor(feature.properties?.highway || ''),
-                    weight: 1.5,
-                    opacity: 0.85,
+                    color,
+                    weight: hasAnalytics ? 2.5 : 1.5,
+                    opacity: hasAnalytics ? 1 : 0.75,
                   }
                 }
                 // PLZ-Grenzen
@@ -188,14 +249,52 @@ export function AnalysisMap({
                   const name = p.name || '(unbenannt)'
                   const hw   = p.highway || '—'
                   const plzVal = p.plz || '—'
-                  layer.bindPopup(
-                    `<b style="color:#111">${name}</b><br>` +
-                    `<span style="color:#555">PLZ: ${plzVal}</span><br>` +
-                    `<span style="color:#555">Typ: ${hw}</span>`,
-                    { maxWidth: 220 }
-                  )
-                  layer.on('mouseover', () => layer.setStyle({ weight: 3, opacity: 1 }))
-                  layer.on('mouseout',  () => layer.setStyle({ weight: 1.5, opacity: 0.85 }))
+
+                  // street_analytics-Daten für diese Straße suchen
+                  const analyticsEntry = streetAnalytics.get(normalizeForLookup(name))
+
+                  let popupContent: string
+                  if (analyticsEntry) {
+                    const classLabel: Record<string, string> = {
+                      A: 'A – Sehr stark', B: 'B – Stark',
+                      C: 'C – Mittel', D: 'D – Schwach', E: 'E – Kein Kontakt',
+                    }
+                    const cls = analyticsEntry.street_class || '—'
+                    const clsColor = classColor(cls) || '#555'
+                    const revenue = analyticsEntry.revenue.toLocaleString('de-DE', {
+                      minimumFractionDigits: 2, maximumFractionDigits: 2
+                    })
+                    popupContent =
+                      `<b style="color:#111;font-size:13px">${name}</b><br>` +
+                      `<span style="color:#555;font-size:11px">PLZ: ${plzVal}</span><br>` +
+                      `<div style="margin-top:6px;border-top:1px solid #ddd;padding-top:6px">` +
+                      `<span style="color:${clsColor};font-weight:600">Klasse ${cls}</span>` +
+                      (cls !== '—' ? ` – ${classLabel[cls] || ''}` : '') +
+                      `</div>` +
+                      `<table style="margin-top:4px;font-size:12px;border-collapse:collapse">` +
+                      `<tr><td style="color:#555;padding:1px 8px 1px 0">Kunden</td>` +
+                      `<td style="color:#111;font-weight:500">${analyticsEntry.customer_count}</td></tr>` +
+                      `<tr><td style="color:#555;padding:1px 8px 1px 0">Bestellungen</td>` +
+                      `<td style="color:#111;font-weight:500">${analyticsEntry.order_count}</td></tr>` +
+                      `<tr><td style="color:#555;padding:1px 8px 1px 0">Umsatz</td>` +
+                      `<td style="color:#111;font-weight:500">€ ${revenue}</td></tr>` +
+                      `<tr><td style="color:#555;padding:1px 8px 1px 0">Ø Bestellungen/Kunde</td>` +
+                      `<td style="color:#111;font-weight:500">${analyticsEntry.orders_per_customer.toFixed(1)}</td></tr>` +
+                      `</table>`
+                  } else {
+                    // Keine Daten in street_analytics → kein "0 Bestellungen" zeigen
+                    popupContent =
+                      `<b style="color:#111">${name}</b><br>` +
+                      `<span style="color:#555">PLZ: ${plzVal}</span><br>` +
+                      `<span style="color:#555">Typ: ${hw}</span>`
+                  }
+
+                  layer.bindPopup(popupContent, { maxWidth: 260 })
+                  layer.on('mouseover', () => layer.setStyle({ weight: analyticsEntry ? 4 : 3, opacity: 1 }))
+                  layer.on('mouseout',  () => {
+                    const hasA = !!analyticsEntry
+                    layer.setStyle({ weight: hasA ? 2.5 : 1.5, opacity: hasA ? 1 : 0.75 })
+                  })
                 } else {
                   // PLZ-Grenze
                   const status = p.status || 'partial'
@@ -274,6 +373,12 @@ export function AnalysisMap({
             <span className="text-[#8a9bb5]">{item.label}</span>
           </div>
         ))}
+        {showStreetLayer && streetAnalytics.size > 0 && (
+          <div className="border-t border-[#1f2d45] mt-2 pt-2">
+            <div className="text-[#8a9bb5]">{streetAnalytics.size} Straßen mit Daten</div>
+            <div className="text-[#4a5a70] text-[10px] mt-0.5">Grau = keine Analysedaten</div>
+          </div>
+        )}
         {(showStreetLayer || showPlzBoundaries) && (
           <>
             <div className="border-t border-[#1f2d45] my-2" />
@@ -304,7 +409,7 @@ export function AnalysisMap({
         <div className="absolute top-4 right-4 z-[500] bg-[#111827]/95 backdrop-blur border border-[#1f2d45] rounded-lg p-3 text-xs">
           <div className="font-semibold mb-1 text-white">POIs geladen</div>
           <div className="text-[#8a9bb5]">{poiData.length} Standorte</div>
-          <div className="text-[#7c6dfa]">{poiData.filter((p: Record<string,unknown>) => p.is_competitor).length} Wettbewerber</div>
+          <div className="text-[#7c6dfa]">{(poiData as Array<Record<string,unknown>>).filter(p => p.is_competitor).length} Wettbewerber</div>
         </div>
       )}
 
