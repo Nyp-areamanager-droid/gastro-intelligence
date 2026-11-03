@@ -129,6 +129,7 @@ export default function StreetsPage() {
         <AnalysisMap
           center={[50.958, 6.973]}
           zoom={12}
+          plz={selectedPLZ || undefined}
           showStreets={false}
           showCompetitors={false}
           showB2B={false}
