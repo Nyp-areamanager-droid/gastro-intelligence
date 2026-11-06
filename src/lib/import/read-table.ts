@@ -25,7 +25,12 @@ export function decodeCsv(buffer: ArrayBuffer): string {
 
 export function readWorkbook(buffer: ArrayBuffer, name: string, type: string): XLSX.WorkBook {
   if (isCsvFile(name, type)) {
-    return XLSX.read(decodeCsv(buffer), { type: 'string', cellDates: true })
+    // raw: true → Werte bleiben Text. Sonst liest die Bibliothek "143,91" als 14391
+    // (Komma als Tausendertrenner). Zahlen und Daten wandelt parseAndCleanRows selbst um.
+    return XLSX.read(decodeCsv(buffer), { type: 'string', raw: true })
   }
-  return XLSX.read(buffer, { type: 'array', cellDates: true })
+  // Kein cellDates: Datumszellen kommen als Excel-Seriennummer und werden in
+  // parseAndCleanRows exakt (UTC) umgerechnet. Mit cellDates entstehen Date-Objekte,
+  // die als Text nicht mehr erkannt wurden (Datum ging verloren).
+  return XLSX.read(buffer, { type: 'array' })
 }

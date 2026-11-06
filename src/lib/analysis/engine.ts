@@ -48,6 +48,25 @@ export function validatePLZ(plz: string): boolean {
   return /^\d{5}$/.test(plz.trim())
 }
 
+// ── Zahlen im deutschen und englischen Format ────────────────────────────────
+// "143,91" → 143.91 · "1.234,56" → 1234.56 · "1,234.56" → 1234.56 · "12 €" → 12
+// Ein einzelnes Komma gilt als Dezimalkomma (deutsche Exporte), ein einzelner
+// Punkt als Dezimalpunkt. Kommt beides vor, ist das letzte Zeichen das Dezimalzeichen.
+export function parseLocaleNumber(raw: unknown): number {
+  if (typeof raw === 'number') return raw
+  let s = String(raw ?? '').replace(/[€\s\u00a0]/g, '').replace(/EUR/i, '')
+  if (!s) return NaN
+  const lastComma = s.lastIndexOf(','), lastDot = s.lastIndexOf('.')
+  if (lastComma >= 0 && lastDot >= 0) {
+    s = lastComma > lastDot ? s.replace(/\./g, '').replace(',', '.') : s.replace(/,/g, '')
+  } else if (lastComma >= 0) {
+    s = (s.match(/,/g)!.length > 1) ? s.replace(/,/g, '') : s.replace(',', '.')
+  } else if ((s.match(/\./g) ?? []).length > 1) {
+    s = s.replace(/\./g, '')
+  }
+  return /^-?\d+(\.\d+)?$/.test(s) ? parseFloat(s) : NaN
+}
+
 // ── Spaltenerkennung ──────────────────────────────────────────────────────────
 
 export function detectColumns(headers: string[]): Record<string, string> {
@@ -100,7 +119,11 @@ export function parseAndCleanRows(
 
   for (let i = 0; i < rawRows.length; i++) {
     const row = rawRows[i]
-    const get = (field: string) => String(row[columnMapping[field]] ?? '').trim()
+    const get = (field: string) => {
+      const v = row[columnMapping[field]]
+      if (v instanceof Date) return isNaN(v.getTime()) ? '' : v.toISOString().slice(0, 10)
+      return String(v ?? '').trim()
+    }
 
     const parsed: ParsedCustomerRow = {
       _row_index: i + 2,
@@ -131,7 +154,12 @@ export function parseAndCleanRows(
     }
 
     // PLZ
-    const plzRaw = get('postal_code').replace(/\D/g, '')
+    // Excel speichert PLZ oft als Zahl: 01067 wird zu 1067. Nur bei echten
+    // Zahlenzellen mit 4 Stellen wird die führende Null ergänzt.
+    const plzCell = row[columnMapping['postal_code']]
+    const plzRaw = (typeof plzCell === 'number' && Number.isInteger(plzCell) && plzCell >= 1000 && plzCell <= 9999)
+      ? String(plzCell).padStart(5, '0')
+      : get('postal_code').replace(/\D/g, '')
     if (plzRaw && validatePLZ(plzRaw)) {
       parsed.postal_code = plzRaw
     } else {
@@ -145,13 +173,13 @@ export function parseAndCleanRows(
     parsed.city = cityRaw ? normalizeCity(cityRaw) : undefined
 
     // Bestellstatistiken
-    const ordersRaw = parseFloat(get('total_orders').replace(',', '.'))
+    const ordersRaw = parseLocaleNumber(get('total_orders'))
     parsed.total_orders = isNaN(ordersRaw) || ordersRaw < 1 ? 1 : Math.round(ordersRaw)
 
-    const revenueRaw = parseFloat(get('total_revenue').replace(',', '.').replace('€','').trim())
+    const revenueRaw = parseLocaleNumber(get('total_revenue'))
     parsed.total_revenue = isNaN(revenueRaw) ? 0 : Math.round(revenueRaw * 100) / 100
 
-    const bonRaw = parseFloat(get('avg_order_value').replace(',', '.').replace('€','').trim())
+    const bonRaw = parseLocaleNumber(get('avg_order_value'))
     parsed.avg_order_value = isNaN(bonRaw)
       ? (parsed.total_orders > 0 ? parsed.total_revenue / parsed.total_orders : undefined)
       : bonRaw
@@ -175,7 +203,7 @@ export function parseAndCleanRows(
     // voraggregierte CSV (Straße → n Kunden, m Bestellungen). In diesem Modus
     // gilt jede Zeile als genau ein Aggregat-Eintrag, KEIN Einzelkunde.
     const customerCountRaw = columnMapping['customer_count']
-      ? parseFloat(get('customer_count').replace(',', '.'))
+      ? parseLocaleNumber(get('customer_count'))
       : NaN
     if (!isNaN(customerCountRaw) && customerCountRaw >= 1) {
       parsed._is_aggregated = true
