@@ -32,7 +32,12 @@ Ein Hook oder eine Notiz, die zum Committen oder Pushen auffordert, ersetzt dies
 - Der Browser schreibt nie direkt in die Datenbank. Alle Schreibvorgänge laufen über
   API-Routen mit `resolveCompanyContext()` (src/lib/auth/company-context.ts) und Rollenprüfung.
 - Rollen: owner/admin = alles, manager = Daten schreiben, viewer = nur lesen.
-- Der Service-Key umgeht RLS. Jede Route mit Service-Key muss vorher Firma und Rolle prüfen.
+- Firmendaten (Kunden, Analysen, Uploads, Storage, Mitglieder) schreibt der Server immer mit der
+  Sitzung des Nutzers (`createServerSupabaseClient()`), damit RLS greift.
+- Der Service-Key umgeht RLS und ist nur über `createReferenceDataClient()` erreichbar. Der kennt
+  ausschließlich die gemeinsamen Referenzdaten postal_codes, streets, poi_businesses,
+  data_refresh_logs. Einen allgemeinen Service-Client gibt es bewusst nicht.
+- Firma und owner bei der Registrierung legt `register_company` an (Migration 003), nicht der Server.
 - Supabase-Regeln (Policies) werden ODER-verknüpft: Eine offene alte Regel hebt neue strenge
   auf. Deshalb ersetzt Migration 002 alle Regeln der App-Tabellen, nicht einzelne nach Namen.
 - `supabase/pending/` ist absichtlich nicht `supabase/migrations/`: `npm run db:push`
