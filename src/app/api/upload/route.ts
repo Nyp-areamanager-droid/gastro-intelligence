@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import * as XLSX from 'xlsx'
-import { createServiceClient } from '@/lib/supabase/server'
+import { createServerSupabaseClient, createServiceClient } from '@/lib/supabase/server'
+import { resolveCompanyContext, canWriteCompanyData, sanitizeStorageFileName } from '@/lib/auth/company-context'
 import {
   detectColumns, parseAndCleanRows, computeRFM,
   computeDashboardKPIs, generateAlerts, generateRecommendations,
@@ -13,22 +14,55 @@ import type { ParsedCustomerRow } from '@/types'
 export const maxDuration = 60 // Vercel: max 60s für Pro plan
 
 export async function POST(req: NextRequest) {
+  // ── 0. Nutzer und Firma serverseitig ermitteln ────────────────────────────
+  // Die Firma kommt ausschließlich aus der Sitzung. Erst danach wird der
+  // Service-Key verwendet, der RLS umgeht.
+  const auth = await resolveCompanyContext(createServerSupabaseClient())
+  if (auth.ok === false) {
+    return NextResponse.json({ error: auth.error }, { status: auth.status })
+  }
+  const { companyId, userId } = auth.ctx
+
+  // Import verändert Firmendaten: nur owner, admin, manager (nicht viewer)
+  if (!canWriteCompanyData(auth.ctx)) {
+    return NextResponse.json({ error: 'Keine Berechtigung zum Importieren von Daten' }, { status: 403 })
+  }
+
   const supabase = createServiceClient()
 
   try {
     const formData = await req.formData()
     const file = formData.get('file') as File
-    const companyId = formData.get('company_id') as string
-    const storeId = formData.get('store_id') as string | null
-    const userId = formData.get('user_id') as string
+    const requestedCompanyId = formData.get('company_id') as string | null
+    const storeIdRaw = formData.get('store_id') as string | null
+    const storeId = storeIdRaw && storeIdRaw.trim() ? storeIdRaw.trim() : null
 
-    if (!file || !companyId) {
-      return NextResponse.json({ error: 'Datei und company_id erforderlich' }, { status: 400 })
+    if (!file) {
+      return NextResponse.json({ error: 'Datei erforderlich' }, { status: 400 })
+    }
+
+    // Ältere Clients senden company_id noch mit. Weicht sie von der
+    // Sitzung ab, wird abgelehnt statt still die eigene Firma zu nehmen.
+    if (requestedCompanyId && requestedCompanyId !== companyId) {
+      return NextResponse.json({ error: 'Kein Zugriff auf dieses Unternehmen' }, { status: 403 })
+    }
+
+    // Filiale muss zur eigenen Firma gehören
+    if (storeId) {
+      const { data: store } = await supabase
+        .from('stores')
+        .select('id')
+        .eq('id', storeId)
+        .eq('company_id', companyId)
+        .maybeSingle()
+      if (!store) {
+        return NextResponse.json({ error: 'Filiale gehört nicht zu diesem Unternehmen' }, { status: 403 })
+      }
     }
 
     // ── 1. Datei in Supabase Storage hochladen ────────────────────────────────
     const fileBuffer = await file.arrayBuffer()
-    const storagePath = `${companyId}/${Date.now()}_${file.name}`
+    const storagePath = `${companyId}/${Date.now()}_${sanitizeStorageFileName(file.name)}`
 
     const { error: storageError } = await supabase.storage
       .from('uploads')

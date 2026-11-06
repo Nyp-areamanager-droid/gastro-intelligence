@@ -1,9 +1,11 @@
 'use client'
 
 import { useState } from 'react'
-import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
+import { createClient } from '@/lib/supabase/client'
+import { validateRegistrationInput } from '@/lib/auth/registration'
+import { completeRegistration } from '@/lib/auth/complete-registration-client'
 
 export default function RegisterPage() {
   const [step, setStep] = useState<1|2>(1)
@@ -22,25 +24,28 @@ export default function RegisterPage() {
     setError('')
 
     try {
-      // 1. User anlegen
-      const { data: authData, error: authError } = await supabase.auth.signUp({ email, password })
+      const input = validateRegistrationInput({ email, password, companyName })
+      if (input.ok === false) throw new Error(input.error)
+
+      // 1. Konto im Browser anlegen: Supabase-Rate-Limits greifen pro Nutzer-IP.
+      //    Der Firmenname wird nur als Wunsch in den eigenen Metadaten abgelegt.
+      const { data: authData, error: authError } = await supabase.auth.signUp({
+        email: input.value.email,
+        password: input.value.password,
+        options: { data: { company_name: input.value.companyName } },
+      })
       if (authError || !authData.user) throw new Error(authError?.message || 'Registrierung fehlgeschlagen')
 
-      // 2. Company anlegen
-      const slug = companyName.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').slice(0, 50)
-      const { data: company, error: compError } = await supabase
-        .from('companies')
-        .insert({ name: companyName, slug: `${slug}-${Date.now()}`, plan: 'trial' })
-        .select().single()
+      // 2. Ohne Sitzung ist die E-Mail-Bestätigung aktiv. Die Firma wird
+      //    dann beim ersten Login angelegt.
+      if (!authData.session) {
+        setError('Fast geschafft: Bitte bestätige deine E-Mail-Adresse und melde dich dann an.')
+        return
+      }
 
-      if (compError || !company) throw new Error('Unternehmen konnte nicht angelegt werden')
-
-      // 3. User als Owner eintragen
-      await supabase.from('company_users').insert({
-        company_id: company.id,
-        user_id: authData.user.id,
-        role: 'owner',
-      })
+      // 3. Firma und Owner-Zuordnung serverseitig anlegen
+      const done = await completeRegistration()
+      if (!done.ok) throw new Error(done.error)
 
       router.push('/dashboard')
     } catch (err) {

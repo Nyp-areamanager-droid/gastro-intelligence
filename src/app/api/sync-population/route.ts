@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
-import { createServiceClient } from '@/lib/supabase/server'
+import { createServerSupabaseClient, createServiceClient } from '@/lib/supabase/server'
+import { resolveCompanyContext, canWriteCompanyData } from '@/lib/auth/company-context'
 
 // Zensus 2022 Einwohnerdaten (Köln + andere Städte)
 const CENSUS: Record<string, { pop: number; hh: number }> = {
@@ -25,13 +26,28 @@ const CENSUS: Record<string, { pop: number; hh: number }> = {
 }
 
 export async function POST() {
+  // Nur die Analysen der eigenen Firma — nie die aller Mandanten
+  const auth = await resolveCompanyContext(createServerSupabaseClient())
+  if (auth.ok === false) {
+    return NextResponse.json({ error: auth.error }, { status: auth.status })
+  }
+  const { companyId } = auth.ctx
+
+  // Ändert gespeicherte Analysen: nur Schreibrollen. Das Dashboard ruft die
+  // Route bei jedem Laden auf und ignoriert Fehler, für viewer bleibt also
+  // alles beim Alten.
+  if (!canWriteCompanyData(auth.ctx)) {
+    return NextResponse.json({ error: 'Keine Berechtigung zum Ändern von Analysen' }, { status: 403 })
+  }
+
   try {
     const supabase = createServiceClient()
 
-    // Alle analytics rows laden
+    // Analytics-Zeilen der eigenen Firma laden
     const { data: rows, error } = await supabase
       .from('analytics')
       .select('id, postal_code, population, customer_count, order_count')
+      .eq('company_id', companyId)
 
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })
     if (!rows?.length) return NextResponse.json({ updated: 0, total: 0 })
@@ -52,6 +68,7 @@ export async function POST() {
           market_penetration_pct: penetration,
         })
         .eq('id', row.id)
+        .eq('company_id', companyId)
 
       if (!updateError) updated++
 

@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
+import { completeRegistration } from '@/lib/auth/complete-registration-client'
 
 export default function LoginPage() {
   const [email, setEmail] = useState('')
@@ -22,6 +23,17 @@ export default function LoginPage() {
     if (error) {
       setError(error.message === 'Invalid login credentials' ? 'E-Mail oder Passwort falsch' : error.message)
     } else {
+      // Holt eine Firmenanlage nach, falls sie bei der Registrierung noch
+      // nicht möglich war (E-Mail-Bestätigung) oder abgebrochen ist.
+      // Für bestehende Nutzer passiert nichts. Konten ohne hinterlegten
+      // Firmennamen (400) werden nicht ausgesperrt, nur technische Fehler
+      // halten den Login an, damit sie nicht unbemerkt bleiben.
+      const done = await completeRegistration()
+      if (!done.ok && done.status !== 400) {
+        setError(done.error || 'Unternehmen konnte nicht eingerichtet werden')
+        setLoading(false)
+        return
+      }
       router.push('/dashboard')
       router.refresh()
     }

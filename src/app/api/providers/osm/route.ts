@@ -1,13 +1,27 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createServiceClient } from '@/lib/supabase/server'
+import { createServerSupabaseClient, createServiceClient } from '@/lib/supabase/server'
+import { resolveCompanyContext, hasRole, ADMIN_ROLES } from '@/lib/auth/company-context'
 import { osmProvider } from '@/lib/providers'
 import type { POICategory } from '@/types'
 
+const DEFAULT_CATEGORIES = ['restaurant', 'hotel', 'school', 'hospital', 'authority', 'fitness', 'office']
+
 // GET /api/providers/osm?plz=51063&categories=restaurant,hotel,school
 export async function GET(req: NextRequest) {
+  // Nur für eingeloggte Mitglieder einer Firma. Die Route schreibt mit dem
+  // Service-Key in gemeinsame Referenztabellen (keine Firmendaten).
+  const auth = await resolveCompanyContext(createServerSupabaseClient())
+  if (auth.ok === false) {
+    return NextResponse.json({ error: auth.error }, { status: auth.status })
+  }
+
   const plz = req.nextUrl.searchParams.get('plz')
-  const categoriesParam = req.nextUrl.searchParams.get('categories') || 'restaurant,hotel,school,hospital,authority,fitness,office'
+  const categoriesParam = req.nextUrl.searchParams.get('categories') || DEFAULT_CATEGORIES.join(',')
   const forceRefresh = req.nextUrl.searchParams.get('refresh') === 'true'
+  // Erzwungenes Neuladen überschreibt den gemeinsamen Cache für alle Firmen
+  if (forceRefresh && !hasRole(auth.ctx, ADMIN_ROLES)) {
+    return NextResponse.json({ error: 'Neuladen nur für Inhaber oder Admins' }, { status: 403 })
+  }
 
   if (!plz || !/^\d{5}$/.test(plz)) {
     return NextResponse.json({ error: 'Ungültige PLZ' }, { status: 400 })
@@ -62,9 +76,15 @@ export async function GET(req: NextRequest) {
     last_fetched_at: new Date().toISOString(),
   }))
 
-  // In DB speichern (alte löschen, neue einfügen)
-  await supabase.from('poi_businesses').delete().eq('postal_code', plz).eq('data_source', 'osm')
-  if (poiRecords.length > 0) {
+  // In DB speichern (alte löschen, neue einfügen) – nur wenn das sicher ist:
+  // - Overpass hat etwas geliefert. Ein leeres Ergebnis heißt meist
+  //   „Dienst nicht erreichbar“, nicht „keine POIs“, und würde sonst den
+  //   gemeinsamen Bestand für alle Firmen löschen.
+  // - Es wurden alle Standard-Kategorien abgefragt. Eine Teilabfrage
+  //   (z. B. nur hotel) würde sonst alle anderen Kategorien löschen.
+  const isFullCategorySet = DEFAULT_CATEGORIES.every(c => categories.includes(c as POICategory))
+  if (poiRecords.length > 0 && isFullCategorySet) {
+    await supabase.from('poi_businesses').delete().eq('postal_code', plz).eq('data_source', 'osm')
     await supabase.from('poi_businesses').insert(poiRecords)
   }
 
