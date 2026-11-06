@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { createServerSupabaseClient, createServiceClient } from '@/lib/supabase/server'
+import { createServerSupabaseClient, createReferenceDataClient } from '@/lib/supabase/server'
 import { resolveCompanyContext, canWriteCompanyData } from '@/lib/auth/company-context'
 
 // Zensus 2022 Einwohnerdaten (Köln + andere Städte)
@@ -27,7 +27,8 @@ const CENSUS: Record<string, { pop: number; hh: number }> = {
 
 export async function POST() {
   // Nur die Analysen der eigenen Firma — nie die aller Mandanten
-  const auth = await resolveCompanyContext(createServerSupabaseClient())
+  const supabase = createServerSupabaseClient()
+  const auth = await resolveCompanyContext(supabase)
   if (auth.ok === false) {
     return NextResponse.json({ error: auth.error }, { status: auth.status })
   }
@@ -41,7 +42,9 @@ export async function POST() {
   }
 
   try {
-    const supabase = createServiceClient()
+    // Analysen der Firma mit der Sitzung des Nutzers, PLZ-Einwohner (gemeinsame
+    // Referenzdaten) mit dem Referenzdaten-Client
+    const reference = createReferenceDataClient()
 
     // Analytics-Zeilen der eigenen Firma laden
     const { data: rows, error } = await supabase
@@ -74,7 +77,7 @@ export async function POST() {
 
       // Auch postal_codes updaten
       try {
-        await supabase.from('postal_codes').upsert({
+        await reference.from('postal_codes').upsert({
           postal_code: row.postal_code,
           city: row.postal_code,
           population: c.pop,

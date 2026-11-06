@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import * as XLSX from 'xlsx'
-import { createServerSupabaseClient, createServiceClient } from '@/lib/supabase/server'
+import { createServerSupabaseClient, createReferenceDataClient } from '@/lib/supabase/server'
 import { resolveCompanyContext, canWriteCompanyData, sanitizeStorageFileName } from '@/lib/auth/company-context'
 import {
   detectColumns, parseAndCleanRows, computeRFM,
@@ -17,9 +17,11 @@ export const maxDuration = 60 // Vercel: max 60s für Pro plan
 
 export async function POST(req: NextRequest) {
   // ── 0. Nutzer und Firma serverseitig ermitteln ────────────────────────────
-  // Die Firma kommt ausschließlich aus der Sitzung. Erst danach wird der
-  // Service-Key verwendet, der RLS umgeht.
-  const auth = await resolveCompanyContext(createServerSupabaseClient())
+  // Die Firma kommt ausschließlich aus der Sitzung. Alle Firmendaten (Datei,
+  // Upload, Kunden, Analysen) werden mit DIESER Sitzung geschrieben, die
+  // RLS-Regeln greifen also zusätzlich zur Prüfung hier.
+  const supabase = createServerSupabaseClient()
+  const auth = await resolveCompanyContext(supabase)
   if (auth.ok === false) {
     return NextResponse.json({ error: auth.error }, { status: auth.status })
   }
@@ -30,7 +32,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Keine Berechtigung zum Importieren von Daten' }, { status: 403 })
   }
 
-  const supabase = createServiceClient()
+  // Service-Key nur für gemeinsame Referenzdaten (PLZ, Straßenverzeichnis)
+  const reference = createReferenceDataClient()
 
   try {
     const formData = await req.formData()
@@ -184,7 +187,7 @@ export async function POST(req: NextRequest) {
       // Nur vollständige Listen speichern
       if (streetDir.complete) {
         const plzInfo = await orchestrator.getPostalCodeData(plz)
-        await supabase.from('postal_codes').upsert({
+        await reference.from('postal_codes').upsert({
           postal_code: plz,
           city: plzInfo.info.city || plzRows[0]?.city || plz,
           state: plzInfo.info.state || null,
@@ -202,10 +205,10 @@ export async function POST(req: NextRequest) {
           data_source: 'openplz' as const,
           last_fetched_at: fetchedAt,
         }))
-        const { error: deleteError } = await supabase.from('streets').delete().eq('postal_code', plz)
+        const { error: deleteError } = await reference.from('streets').delete().eq('postal_code', plz)
         if (!deleteError) {
           for (let i = 0; i < cacheRecords.length; i += 500) {
-            await supabase.from('streets').upsert(cacheRecords.slice(i, i + 500), { onConflict: 'postal_code,name_normalized', ignoreDuplicates: true })
+            await reference.from('streets').upsert(cacheRecords.slice(i, i + 500), { onConflict: 'postal_code,name_normalized', ignoreDuplicates: true })
           }
         }
       }
@@ -226,7 +229,7 @@ export async function POST(req: NextRequest) {
       // Population in postal_codes schreiben falls noch nicht vorhanden
       if (!plzData?.population && population) {
         try {
-          await supabase.from('postal_codes').upsert({
+          await reference.from('postal_codes').upsert({
             postal_code: plz,
             city: plzRows[0]?.city || plz,
             population,

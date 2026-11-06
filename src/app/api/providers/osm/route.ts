@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createServerSupabaseClient, createServiceClient } from '@/lib/supabase/server'
+import { createServerSupabaseClient, createReferenceDataClient } from '@/lib/supabase/server'
 import { resolveCompanyContext, hasRole, ADMIN_ROLES } from '@/lib/auth/company-context'
 import { osmProvider } from '@/lib/providers'
 import type { POICategory } from '@/types'
@@ -28,7 +28,8 @@ export async function GET(req: NextRequest) {
   }
 
   const categories = categoriesParam.split(',').filter(Boolean) as POICategory[]
-  const supabase = createServiceClient()
+  // Nur gemeinsame Referenzdaten (siehe createReferenceDataClient)
+  const supabase = createReferenceDataClient()
 
   // Cache-Check (7 Tage)
   if (!forceRefresh) {

@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { createServerSupabaseClient, createServiceClient } from '@/lib/supabase/server'
+import { createServerSupabaseClient } from '@/lib/supabase/server'
 import { validateCompanyName, buildCompanySlug } from '@/lib/auth/registration'
 
 /**
@@ -12,13 +12,13 @@ import { validateCompanyName, buildCompanySlug } from '@/lib/auth/registration'
  * Warum so:
  * - Das Konto selbst wird im Browser per supabase.auth.signUp angelegt.
  *   Dadurch greifen die Rate-Limits von Supabase pro echter IP-Adresse
- *   und optional das CAPTCHA aus den Supabase-Einstellungen. Ein signUp über
- *   den Server würde alle Anfragen über die Server-IP bündeln.
- * - Diese Route ist nicht öffentlich: Sie braucht eine gültige Sitzung.
- *   Die Nutzer-ID kommt aus der Sitzung, nie aus dem Request.
+ *   und optional das CAPTCHA aus den Supabase-Einstellungen.
+ * - Firma und Owner-Zuordnung legt die Datenbankfunktion register_company
+ *   (supabase/pending/003_register_company.sql) an. Sie läuft mit der Sitzung
+ *   des Nutzers, kein Service-Key. Die Funktion legt nur für den Aufrufer selbst
+ *   an, nur wenn er noch keine Firma hat, in einer Transaktion und gegen
+ *   gleichzeitige Aufrufe gesperrt. Andere Firmen kann sie nicht berühren.
  * - Idempotent: Hat der Nutzer schon eine Firma, passiert nichts.
- *   Bricht die Firmenanlage ab, wird sie beim nächsten Login nachgeholt.
- *   Es bleiben also keine Konten dauerhaft ohne Firma zurück.
  * - Firmenname kommt aus den Metadaten, die der Nutzer beim signUp selbst
  *   gesetzt hat. Er betrifft nur seine eigene neue Firma.
  */
@@ -30,10 +30,9 @@ export async function POST() {
     return NextResponse.json({ error: 'Nicht authentifiziert' }, { status: 401 })
   }
 
-  const service = createServiceClient()
-
   // 1. Schon einer Firma zugeordnet? Dann ist nichts zu tun.
-  const { data: existing, error: existingError } = await service
+  //    (Eigene Zuordnung ist für den Nutzer per RLS lesbar.)
+  const { data: existing, error: existingError } = await supabase
     .from('company_users')
     .select('company_id')
     .eq('user_id', user.id)
@@ -50,39 +49,15 @@ export async function POST() {
     return NextResponse.json({ error: 'Kein gültiger Unternehmensname hinterlegt' }, { status: 400 })
   }
 
-  // 3. Firma anlegen
-  const { data: company, error: companyError } = await service
-    .from('companies')
-    .insert({ name: nameCheck.value, slug: buildCompanySlug(nameCheck.value), plan: 'trial' })
-    .select('id')
-    .single()
-  if (companyError || !company) {
+  // 3. Firma + Owner-Zuordnung atomar in der Datenbank anlegen
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data, error } = await (supabase as any).rpc('register_company', {
+    p_name: nameCheck.value,
+    p_slug: buildCompanySlug(nameCheck.value),
+  })
+  if (error || !data) {
     return NextResponse.json({ error: 'Unternehmen konnte nicht angelegt werden' }, { status: 500 })
   }
-
-  // 4. Owner-Zuordnung
-  const { error: memberError } = await service
-    .from('company_users')
-    .insert({ company_id: company.id, user_id: user.id, role: 'owner' })
-  if (memberError) {
-    await service.from('companies').delete().eq('id', company.id)
-    return NextResponse.json({ error: 'Owner-Zuordnung fehlgeschlagen, bitte erneut anmelden' }, { status: 500 })
-  }
-
-  // 5. Doppelte Anlage durch zwei gleichzeitige Aufrufe zurückrollen.
-  // Die älteste Zuordnung bleibt, alle späteren entfernen sich selbst.
-  // So bleibt genau eine Firma übrig, egal wie viele Aufrufe parallel laufen.
-  const { data: after } = await service
-    .from('company_users')
-    .select('company_id, joined_at')
-    .eq('user_id', user.id)
-    .order('joined_at', { ascending: true })
-    .order('company_id', { ascending: true })
-  if (after && after.length > 1 && after[0].company_id !== company.id) {
-    await service.from('company_users').delete().eq('company_id', company.id).eq('user_id', user.id)
-    await service.from('companies').delete().eq('id', company.id)
-    return NextResponse.json({ status: 'already_registered' })
-  }
-
-  return NextResponse.json({ status: 'created' })
+  const status = (data as { status?: string }).status
+  return NextResponse.json({ status: status === 'already_registered' ? 'already_registered' : 'created' })
 }

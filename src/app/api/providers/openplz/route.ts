@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createServerSupabaseClient, createServiceClient } from '@/lib/supabase/server'
+import { createServerSupabaseClient, createReferenceDataClient } from '@/lib/supabase/server'
 import { resolveCompanyContext, hasRole, ADMIN_ROLES } from '@/lib/auth/company-context'
 import { openplzProvider, censusProvider } from '@/lib/providers'
 import { invalidateStreetDirectory } from '@/lib/geo/street-directory'
@@ -24,7 +24,8 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'Ungültige PLZ' }, { status: 400 })
   }
 
-  const supabase = createServiceClient()
+  // Nur gemeinsame Referenzdaten (siehe createReferenceDataClient)
+  const supabase = createReferenceDataClient()
 
   // Immer aus OpenPLZ (mit 6-Stunden-Zwischenspeicher im Serverprozess).
   // Der Datenbank-Cache wird nicht mehr als Quelle gelesen: Er kennt keine

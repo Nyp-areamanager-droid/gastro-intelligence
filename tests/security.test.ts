@@ -44,9 +44,29 @@ function makeQueryClient(resolver: (call: Call) => { data: unknown; error: unkno
   return client
 }
 
-function makeAuthClient(user: { id: string } | null, memberships: { company_id: string; role: string }[] | null, membershipError: unknown = null) {
-  const client = makeQueryClient(() => ({ data: memberships, error: membershipError }))
+/**
+ * Sitzungs-Client: Mitgliedschaften für company_users, für alle anderen
+ * Tabellen die Antwort aus `other` (Standard: leer). Seit Phase 0+ schreibt der
+ * Server Firmendaten mit DIESEM Client (RLS), nicht mit dem Service-Key.
+ */
+function makeAuthClient(
+  user: { id: string } | null,
+  memberships: { company_id: string; role: string }[] | null,
+  membershipError: unknown = null,
+  other: (call: Call) => { data: unknown; error: unknown } = () => ({ data: null, error: null }),
+) {
+  const client = makeQueryClient((call) =>
+    call.table === 'company_users' && !call.ops.some(([op]) => op === 'insert' || op === 'delete')
+      ? { data: memberships, error: membershipError }
+      : other(call))
+  const rpcCalls: { fn: string; args: Record<string, unknown> }[] = []
   return Object.assign(client, {
+    rpcCalls,
+    rpcResult: { data: { status: 'created', company_id: 'firma-neu' } as unknown, error: null as unknown },
+    rpc(fn: string, args: Record<string, unknown>) {
+      rpcCalls.push({ fn, args })
+      return Promise.resolve((client as unknown as { rpcResult: unknown }).rpcResult)
+    },
     auth: { getUser: () => Promise.resolve({ data: { user }, error: null }) },
   })
 }
@@ -177,7 +197,7 @@ vi.mock('@/lib/providers', () => ({
 
 vi.mock('@/lib/supabase/server', () => ({
   createServerSupabaseClient: () => state.authClient,
-  createServiceClient: () => { state.serviceCreated++; return state.serviceClient },
+  createReferenceDataClient: () => { state.serviceCreated++; return state.serviceClient },
 }))
 
 function uploadRequest(fields: Record<string, string>) {
@@ -208,36 +228,37 @@ describe('POST /api/upload – Mandantentrennung', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const res = await POST(uploadRequest({ company_id: 'FREMDE-FIRMA', user_id: 'u1' }) as any)
     expect(res.status).toBe(403)
-    expect(state.serviceClient!.storageUploads).toHaveLength(0)
-    expect(state.serviceClient!.calls.filter(c => c.ops.some(([op]) => op === 'insert' || op === 'delete'))).toHaveLength(0)
+    expect(state.authClient!.storageUploads).toHaveLength(0)
+    expect(state.authClient!.calls.filter(c => c.ops.some(([op]) => op === 'insert' || op === 'delete'))).toHaveLength(0)
+    expect(state.serviceClient!.calls).toHaveLength(0)
   })
 
   it('Filiale einer fremden Firma: 403, nichts wird gespeichert', async () => {
-    state.authClient = makeAuthClient({ id: 'u1' }, [{ company_id: 'A', role: 'owner' }])
     // stores-Abfrage findet nichts für (store_id, company A)
-    state.serviceClient = makeQueryClient(() => ({ data: null, error: null }))
+    state.authClient = makeAuthClient({ id: 'u1' }, [{ company_id: 'A', role: 'owner' }])
     const { POST } = await import('@/app/api/upload/route')
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const res = await POST(uploadRequest({ company_id: 'A', store_id: 'filiale-von-B' }) as any)
     expect(res.status).toBe(403)
-    const storeCall = state.serviceClient!.calls.find(c => c.table === 'stores')!
+    const storeCall = state.authClient!.calls.find(c => c.table === 'stores')!
     expect(storeCall.ops).toContainEqual(['eq', ['company_id', 'A']])
-    expect(state.serviceClient!.storageUploads).toHaveLength(0)
+    expect(state.authClient!.storageUploads).toHaveLength(0)
   })
 
-  it('eigene Firma: Datei landet im Ordner der Sitzungs-Firma, user_id aus der Sitzung', async () => {
-    state.authClient = makeAuthClient({ id: 'u1' }, [{ company_id: 'A', role: 'manager' }])
+  it('eigene Firma: Datei und Upload-Eintrag mit der Sitzung, Ordner und user_id aus der Sitzung', async () => {
     // uploads-Insert liefert keinen Datensatz -> Route bricht nach Storage-Upload kontrolliert ab
-    state.serviceClient = makeQueryClient(() => ({ data: null, error: null }))
+    state.authClient = makeAuthClient({ id: 'u1' }, [{ company_id: 'A', role: 'manager' }])
     const { POST } = await import('@/app/api/upload/route')
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await POST(uploadRequest({ user_id: 'jemand-anderes' }) as any)
-    expect(state.serviceClient!.storageUploads).toHaveLength(1)
-    expect(state.serviceClient!.storageUploads[0]).toMatch(/^A\/\d+_kunden\.csv$/)
-    const uploadInsert = state.serviceClient!.calls.find(c => c.table === 'uploads')!
+    expect(state.authClient!.storageUploads).toHaveLength(1)
+    expect(state.authClient!.storageUploads[0]).toMatch(/^A\/\d+_kunden\.csv$/)
+    const uploadInsert = state.authClient!.calls.find(c => c.table === 'uploads')!
     const inserted = uploadInsert.ops.find(([op]) => op === 'insert')![1][0] as Record<string, unknown>
     expect(inserted.company_id).toBe('A')
     expect(inserted.uploaded_by).toBe('u1')
+    // Mit dem Service-Key wurde dabei keine Firmentabelle angefasst
+    expect(state.serviceClient!.calls.filter(c => !['postal_codes', 'streets'].includes(c.table))).toHaveLength(0)
   })
 })
 
@@ -252,15 +273,17 @@ describe('POST /api/sync-population – nur eigene Firma', () => {
   })
 
   it('liest und ändert nur Analysen der eigenen Firma', async () => {
-    state.authClient = makeAuthClient({ id: 'u1' }, [{ company_id: 'A', role: 'manager' }])
-    state.serviceClient = makeQueryClient((call) =>
+    state.authClient = makeAuthClient({ id: 'u1' }, [{ company_id: 'A', role: 'manager' }], null, (call) =>
       call.table === 'analytics' && call.ops.some(([op]) => op === 'select')
         ? { data: [{ id: 'an1', postal_code: '50733', population: null, customer_count: 20, order_count: 65 }], error: null }
         : { data: null, error: null })
+    state.serviceClient = makeQueryClient(() => ({ data: null, error: null }))
     const { POST } = await import('@/app/api/sync-population/route')
     const res = await POST()
     expect(res.status).toBe(200)
-    const analyticsCalls = state.serviceClient!.calls.filter(c => c.table === 'analytics')
+    // Analysen der Firma: nur mit der Sitzung, nie mit dem Service-Key
+    expect(state.serviceClient!.calls.some(c => c.table === 'analytics')).toBe(false)
+    const analyticsCalls = state.authClient!.calls.filter(c => c.table === 'analytics')
     expect(analyticsCalls.length).toBe(2) // ein select, ein update
     for (const c of analyticsCalls) expect(c.ops).toContainEqual(['eq', ['company_id', 'A']])
   })
@@ -320,119 +343,76 @@ describe('Rollen – nur owner, admin, manager dürfen Daten schreiben', () => {
 // ── Registrierung abschließen ────────────────────────────────────────────────
 
 describe('POST /api/auth/complete-registration', () => {
-  function authWithUser(user: unknown) {
-    const client = makeAuthClient(null, [])
+  function authWithUser(user: unknown, memberships: { company_id: string; role: string }[] | null = [], membershipError: unknown = null) {
+    const client = makeAuthClient(null, memberships, membershipError)
     return Object.assign(client, {
       auth: { getUser: () => Promise.resolve({ data: { user }, error: null }) },
-    }) as never
+    })
   }
+  beforeEach(() => { state.serviceCreated = 0 })
 
   it('ohne Sitzung: 401, nichts wird angelegt', async () => {
-    state.authClient = authWithUser(null)
-    state.serviceCreated = 0
+    const c = authWithUser(null); state.authClient = c
     const { POST } = await import('@/app/api/auth/complete-registration/route')
     const res = await POST()
     expect(res.status).toBe(401)
+    expect(c.rpcCalls).toHaveLength(0)
     expect(state.serviceCreated).toBe(0)
   })
 
   it('Nutzer hat schon eine Firma: nichts passiert (idempotent)', async () => {
-    state.authClient = authWithUser({ id: 'u1', user_metadata: { company_name: 'Firma' } })
-    state.serviceClient = makeQueryClient((c) =>
-      c.table === 'company_users' ? { data: [{ company_id: 'A' }], error: null } : { data: null, error: null })
+    const c = authWithUser({ id: 'u1', user_metadata: { company_name: 'Firma' } }, [{ company_id: 'A', role: 'owner' }]); state.authClient = c
     const { POST } = await import('@/app/api/auth/complete-registration/route')
     const res = await POST()
     expect(await res.json()).toEqual({ status: 'already_registered' })
-    expect(state.serviceClient!.calls.some(c => c.ops.some(([op]) => op === 'insert'))).toBe(false)
+    expect(c.rpcCalls).toHaveLength(0)
   })
 
-  it('legt Firma und Owner mit der Nutzer-ID aus der Sitzung an', async () => {
-    state.authClient = authWithUser({ id: 'neu-1', user_metadata: { company_name: '  Muster   GmbH ' } })
-    let membershipQueries = 0
-    state.serviceClient = makeQueryClient((c) => {
-      if (c.table === 'company_users' && c.ops.some(([op]) => op === 'select')) {
-        membershipQueries++
-        return membershipQueries === 1
-          ? { data: [], error: null }
-          : { data: [{ company_id: 'firma-neu', joined_at: '2026-11-06' }], error: null }
-      }
-      if (c.table === 'companies') return { data: { id: 'firma-neu' }, error: null }
-      return { data: null, error: null }
-    })
+  it('legt die Firma über register_company mit der Sitzung an, ohne Service-Key', async () => {
+    const c = authWithUser({ id: 'neu-1', user_metadata: { company_name: '  Muster   GmbH ' } }); state.authClient = c
     const { POST } = await import('@/app/api/auth/complete-registration/route')
     const res = await POST()
     expect(await res.json()).toEqual({ status: 'created' })
-    const company = state.serviceClient!.calls.find(c => c.table === 'companies')!
-    expect((company.ops.find(([op]) => op === 'insert')![1][0] as Record<string, unknown>).name).toBe('Muster GmbH')
-    const member = state.serviceClient!.calls.find(c => c.table === 'company_users' && c.ops.some(([op]) => op === 'insert'))!
-    expect(member.ops.find(([op]) => op === 'insert')![1][0]).toEqual({ company_id: 'firma-neu', user_id: 'neu-1', role: 'owner' })
+    expect(c.rpcCalls).toHaveLength(1)
+    expect(c.rpcCalls[0].fn).toBe('register_company')
+    expect(c.rpcCalls[0].args.p_name).toBe('Muster GmbH')
+    expect(String(c.rpcCalls[0].args.p_slug)).toMatch(/^muster-gmbh-\d+$/)
+    // keine Nutzer-ID im Aufruf: die Datenbank nimmt sie aus der Sitzung
+    expect(Object.keys(c.rpcCalls[0].args).sort()).toEqual(['p_name', 'p_slug'])
+    expect(c.calls.some(x => x.ops.some(([op]) => op === 'insert'))).toBe(false)
+    expect(state.serviceCreated).toBe(0)
   })
 
   it('ohne gültigen Firmennamen: 400, nichts wird angelegt', async () => {
-    state.authClient = authWithUser({ id: 'u1', user_metadata: { company_name: 'x' } })
-    state.serviceClient = makeQueryClient((c) => c.table === 'company_users' ? { data: [], error: null } : { data: null, error: null })
+    const c = authWithUser({ id: 'u1', user_metadata: { company_name: 'x' } }); state.authClient = c
     const { POST } = await import('@/app/api/auth/complete-registration/route')
     const res = await POST()
     expect(res.status).toBe(400)
-    expect(state.serviceClient!.calls.some(c => c.ops.some(([op]) => op === 'insert'))).toBe(false)
+    expect(c.rpcCalls).toHaveLength(0)
   })
 
   it('Datenbankfehler bei der Prüfung: 500, keine Firma', async () => {
-    state.authClient = authWithUser({ id: 'u1', user_metadata: { company_name: 'Firma' } })
-    state.serviceClient = makeQueryClient((c) => c.table === 'company_users' ? { data: null, error: { message: 'down' } } : { data: null, error: null })
+    const c = authWithUser({ id: 'u1', user_metadata: { company_name: 'Firma' } }, null, { message: 'down' }); state.authClient = c
     const { POST } = await import('@/app/api/auth/complete-registration/route')
     const res = await POST()
     expect(res.status).toBe(500)
-    expect(state.serviceClient!.calls.some(c => c.table === 'companies')).toBe(false)
+    expect(c.rpcCalls).toHaveLength(0)
   })
 
-  it('Firma lässt sich nicht anlegen: 500, keine Owner-Zuordnung', async () => {
-    state.authClient = authWithUser({ id: 'u1', user_metadata: { company_name: 'Firma' } })
-    state.serviceClient = makeQueryClient((c) => {
-      if (c.table === 'company_users') return { data: [], error: null }
-      if (c.table === 'companies') return { data: null, error: { message: 'fail' } }
-      return { data: null, error: null }
-    })
+  it('register_company schlägt fehl: 500', async () => {
+    const c = authWithUser({ id: 'u1', user_metadata: { company_name: 'Firma' } }); state.authClient = c
+    c.rpcResult = { data: null, error: { message: 'function not found' } }
     const { POST } = await import('@/app/api/auth/complete-registration/route')
     const res = await POST()
     expect(res.status).toBe(500)
-    expect(state.serviceClient!.calls.some(c => c.table === 'company_users' && c.ops.some(([op]) => op === 'insert'))).toBe(false)
   })
 
-  it('Owner-Zuordnung schlägt fehl: Firma wird wieder entfernt', async () => {
-    state.authClient = authWithUser({ id: 'u1', user_metadata: { company_name: 'Firma' } })
-    state.serviceClient = makeQueryClient((c) => {
-      if (c.table === 'company_users' && c.ops.some(([op]) => op === 'insert')) return { data: null, error: { message: 'fail' } }
-      if (c.table === 'company_users') return { data: [], error: null }
-      if (c.table === 'companies' && c.ops.some(([op]) => op === 'insert')) return { data: { id: 'firma-x' }, error: null }
-      return { data: null, error: null }
-    })
-    const { POST } = await import('@/app/api/auth/complete-registration/route')
-    const res = await POST()
-    expect(res.status).toBe(500)
-    const del = state.serviceClient!.calls.find(c => c.table === 'companies' && c.ops.some(([op]) => op === 'delete'))!
-    expect(del.ops).toContainEqual(['eq', ['id', 'firma-x']])
-  })
-
-  it('zwei gleichzeitige Aufrufe: die spätere Firma rollt sich selbst zurück', async () => {
-    state.authClient = authWithUser({ id: 'u1', user_metadata: { company_name: 'Firma' } })
-    let membershipQueries = 0
-    state.serviceClient = makeQueryClient((c) => {
-      if (c.table === 'company_users' && c.ops.some(([op]) => op === 'select')) {
-        membershipQueries++
-        // erste Prüfung leer, danach existieren zwei Zuordnungen – die ältere gehört dem anderen Aufruf
-        return membershipQueries === 1
-          ? { data: [], error: null }
-          : { data: [{ company_id: 'firma-alt', joined_at: '1' }, { company_id: 'firma-neu', joined_at: '2' }], error: null }
-      }
-      if (c.table === 'companies' && c.ops.some(([op]) => op === 'insert')) return { data: { id: 'firma-neu' }, error: null }
-      return { data: null, error: null }
-    })
+  it('gleichzeitiger zweiter Aufruf: Datenbank meldet already_registered, Route gibt das weiter', async () => {
+    const c = authWithUser({ id: 'u1', user_metadata: { company_name: 'Firma' } }); state.authClient = c
+    c.rpcResult = { data: { status: 'already_registered', company_id: 'firma-alt' }, error: null }
     const { POST } = await import('@/app/api/auth/complete-registration/route')
     const res = await POST()
     expect(await res.json()).toEqual({ status: 'already_registered' })
-    const delCompany = state.serviceClient!.calls.find(c => c.table === 'companies' && c.ops.some(([op]) => op === 'delete'))!
-    expect(delCompany.ops).toContainEqual(['eq', ['id', 'firma-neu']])
   })
 })
 

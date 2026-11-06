@@ -399,7 +399,7 @@ function makeServiceClient() {
 }
 
 vi.mock('@/lib/supabase/server', () => ({
-  createServiceClient: () => makeServiceClient(),
+  createReferenceDataClient: () => makeServiceClient(),
   createServerSupabaseClient: () => makeServiceClient(),
 }))
 

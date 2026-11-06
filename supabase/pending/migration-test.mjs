@@ -398,6 +398,101 @@ try { await db.exec(ROLLBACK); pass('Rückfall ohne Sicherung bricht ab', false)
 catch { await db.exec('ROLLBACK').catch(() => {}); pass('Rückfall ohne Sicherung bricht ab', true) }
 pass('… und ändert dabei nichts', (await securityState()) === sec3)
 
+
+// ── Upload und Registrierung OHNE Service-Key (Sitzung des Nutzers + RLS) ───
+// Prüft, dass die Regeln von 002 alle Schreibschritte der Upload-Route für
+// Schreibrollen erlauben und für viewer und fremde Firmen verweigern, und dass
+// register_company (003) die Firmenanlage sicher übernimmt.
+async function requiredCols(t) {
+  return (await db.query(`SELECT column_name, data_type, udt_name FROM information_schema.columns
+    WHERE table_schema='public' AND table_name=$1 AND is_nullable='NO' AND column_default IS NULL`, [t])).rows
+}
+async function insertSql(t, company, uid, extra = {}) {
+  const cols = { company_id: `'${company}'`, ...extra }
+  for (const c of await requiredCols(t)) {
+    if (cols[c.column_name] !== undefined) continue
+    const n = c.column_name
+    if (n.endsWith('_by') || n === 'user_id') cols[n] = `'${uid}'`
+    else if (n === 'analytics_id') cols[n] = `(SELECT id FROM analytics WHERE company_id='${company}' LIMIT 1)`
+    else if (c.data_type === 'USER-DEFINED') {
+      const e = (await db.query(`SELECT e.enumlabel FROM pg_enum e JOIN pg_type t ON t.oid=e.enumtypid WHERE t.typname=$1 ORDER BY e.enumsortorder LIMIT 1`, [c.udt_name])).rows[0]
+      cols[n] = `'${e.enumlabel}'`
+    } else if (c.data_type === 'uuid') cols[n] = 'gen_random_uuid()'
+    else if (/int|numeric|double|real/.test(c.data_type)) cols[n] = '1'
+    else if (c.data_type === 'boolean') cols[n] = 'false'
+    else if (/timestamp|date/.test(c.data_type)) cols[n] = 'now()'
+    else if (/json/.test(c.data_type)) cols[n] = `'{}'`
+    else if (c.data_type === 'ARRAY') cols[n] = `'{}'`
+    else cols[n] = `'test'`
+  }
+  return `INSERT INTO ${t} (${Object.keys(cols).join(',')}) VALUES (${Object.values(cols).join(',')})`
+}
+async function userSessionChecks() {
+  const c = {}
+  const uploadTables = ['uploads', 'customers', 'analytics', 'street_analytics', 'alerts', 'marketing_actions']
+  for (const t of uploadTables) {
+    if (!(await has(t))) continue
+    const extra = t === 'customers' ? { postal_code: `'50733'` } : {}
+    let r = await probe('authenticated', U.managerA, await insertSql(t, A, U.managerA, extra))
+    c[`Upload als manager: ${t} anlegen`] = r.ok
+    r = await probe('authenticated', U.viewerA, await insertSql(t, A, U.viewerA, extra))
+    c[`Upload als viewer: ${t} verweigert`] = !r.ok
+    r = await probe('authenticated', U.managerA, await insertSql(t, B, U.managerA, extra))
+    c[`Upload als manager in Firma B: ${t} verweigert`] = !r.ok
+  }
+  let r = await probe('authenticated', U.managerA, `UPDATE uploads SET company_id = company_id WHERE company_id='${A}'`)
+  c['Upload als manager: Upload-Status aktualisieren'] = r.ok && r.affected > 0
+  r = await probe('authenticated', U.managerA, `DELETE FROM analytics WHERE company_id='${A}'`)
+  c['Upload als manager: alte Analysen der eigenen Firma ersetzen'] = r.ok && r.affected > 0
+  r = await probe('authenticated', U.managerA, `INSERT INTO storage.objects (bucket_id, name) VALUES ('uploads','${A}/import.csv')`)
+  c['Upload als manager: Datei im eigenen Ordner speichern'] = r.ok
+  r = await probe('authenticated', U.managerA, `INSERT INTO storage.objects (bucket_id, name) VALUES ('uploads','${B}/import.csv')`)
+  c['Upload als manager: Datei im Ordner von B verweigert'] = !r.ok
+  r = await probe('authenticated', U.managerA, `UPDATE streets SET name = name`)
+  c['Referenzdaten bleiben für Nutzer schreibgeschützt'] = !(r.ok && r.affected > 0)
+
+  const reg = join(here, '003_register_company.sql')
+  let regSql = null
+  try { regSql = readFileSync(reg, 'utf8') } catch { /* 003 fehlt */ }
+  if (regSql) {
+    try { await db.exec(regSql); c['003 läuft ohne Fehler'] = true } catch (e) { await db.exec('ROLLBACK').catch(() => {}); c['003 läuft ohne Fehler'] = false }
+    try { await db.exec(regSql); c['003 zweiter Lauf ohne Fehler'] = true } catch { await db.exec('ROLLBACK').catch(() => {}); c['003 zweiter Lauf ohne Fehler'] = false }
+    r = await probe('authenticated', U.newUser, `SELECT public.register_company('Neue Pizzeria', 'neue-pizzeria-1') AS j`)
+    c['register_company: neuer Nutzer bekommt Firma'] = r.ok && r.rows[0].j.status === 'created'
+    await db.exec('BEGIN')
+    let r2
+    try {
+      await db.query(`SELECT set_config('request.jwt.claim.sub', $1, true)`, [U.newUser])
+      await db.exec(`SET LOCAL ROLE authenticated`)
+      const first = (await db.query(`SELECT public.register_company('Neue Pizzeria', 'neue-pizzeria-1') AS j`)).rows[0].j
+      const second = (await db.query(`SELECT public.register_company('Andere Firma', 'andere-1') AS j`)).rows[0].j
+      const mine = (await db.query(`SELECT role::text AS role, company_id FROM company_users WHERE user_id = '${U.newUser}'`)).rows
+      r2 = { first, second, mine }
+    } catch (e) { r2 = { err: e.message } } finally { await db.exec('ROLLBACK') }
+    c['register_company: zweiter Aufruf legt nichts Neues an'] = !r2.err && r2.second.status === 'already_registered' && r2.second.company_id === r2.first.company_id
+    c['register_company: genau eine owner-Zuordnung'] = !r2.err && r2.mine.length === 1 && r2.mine[0].role === 'owner'
+    r = await probe('authenticated', U.ownerA, `SELECT public.register_company('Zweitfirma', 'zweit-1') AS j`)
+    c['register_company: wer schon eine Firma hat, bekommt keine zweite'] = r.ok && r.rows[0].j.status === 'already_registered' && r.rows[0].j.company_id === A
+    r = await probe('anon', null, `SELECT public.register_company('Anonym', 'anonym-1')`)
+    c['register_company: ohne Login nicht ausführbar'] = !r.ok
+    r = await probe('authenticated', U.stranger, `SELECT public.register_company('X', 'x-1')`)
+    c['register_company: zu kurzer Name abgelehnt'] = !r.ok
+    r = await probe('authenticated', U.stranger, `SELECT public.register_company('Gute Firma', 'Böse; DROP')`)
+    c['register_company: ungültiger Kurzname abgelehnt'] = !r.ok
+    r = await probe('authenticated', U.stranger, `SELECT public.register_company('Testfirma', 'a') AS j`)
+    const cnt = r.ok ? (await db.query(`SELECT count(*)::int AS n FROM companies WHERE name='Testfirma'`)).rows[0].n : -1
+    c['register_company: Probe hinterlässt nichts (zurückgerollt)'] = cnt === 0
+    r = await probe('authenticated', U.stranger, `SELECT public.register_company('Firma Slugtest', 'a') AS j`)
+    c['register_company: vergebener Kurzname wird eindeutig gemacht'] = r.ok && r.rows[0].j.status === 'created'
+  }
+  return c
+}
+// Vergleich mit dem Stand direkt davor: Nach dem Rückfall-Test sind die Lücken
+// absichtlich offen gewesen und Angriffsprüfungen haben Zeitstempel geändert.
+const dataBeforeUS = await dataState()
+for (const [n, ok] of Object.entries(await userSessionChecks())) pass(`Ohne Service-Key: ${n}`, ok)
+pass('Ohne-Service-Key-Prüfungen hinterlassen keine Daten', JSON.stringify(await dataState()) === JSON.stringify(dataBeforeUS))
+
 report()
 
 function report() {
