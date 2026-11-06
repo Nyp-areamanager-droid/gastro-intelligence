@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createServerSupabaseClient } from '@/lib/supabase/server'
 import { analyzePLZ, analyzeStreets } from '@/lib/analysis/engine'
 import { DataProviderOrchestrator } from '@/lib/providers'
+import { fetchAllRows } from '@/lib/supabase/fetch-all'
 
 // GET /api/analysis/plz?plz=51063&upload_id=xxx
 export async function GET(req: NextRequest) {
@@ -26,24 +27,26 @@ export async function GET(req: NextRequest) {
   const companyId = membership.company_id
   const googleKey = (membership.companies as Record<string,string>)?.google_places_api_key
 
-  // Kunden für diese PLZ
-  let query = supabase.from('customers').select('*').eq('company_id', companyId).eq('postal_code', plz)
-  if (uploadId) query = query.eq('upload_id', uploadId)
-  const { data: customers } = await query
+  // Kunden für diese PLZ – alle, nicht nur die ersten 1.000
+  const { data: customers, error: customersError } = await fetchAllRows((from, to) => {
+    let q = supabase.from('customers').select('*', { count: 'exact' }).eq('company_id', companyId).eq('postal_code', plz)
+    if (uploadId) q = q.eq('upload_id', uploadId)
+    return q.order('id').range(from, to)
+  })
+  if (customersError) {
+    return NextResponse.json({ error: 'Kundendaten konnten nicht vollständig geladen werden', plz }, { status: 500 })
+  }
 
   if (!customers?.length) {
     return NextResponse.json({ error: `Keine Kunden für PLZ ${plz}`, plz }, { status: 404 })
   }
 
-  // Straßen aus DB oder live
-  const { data: dbStreets } = await supabase.from('streets').select('name').eq('postal_code', plz)
-  let officialStreets = dbStreets?.map(s => s.name) || []
-
-  if (!officialStreets.length) {
-    const orchestrator = new DataProviderOrchestrator(googleKey)
-    const result = await orchestrator.getStreets(plz)
-    officialStreets = result.streets
-  }
+  // Straßenverzeichnis live (vollständig oder ausdrücklich unvollständig).
+  // Der Straßen-Cache in der Datenbank hat keine Vollständigkeits-Kennung
+  // und wird deshalb nicht als Grundlage für "ohne Bestellungen" genutzt.
+  const orchestrator = new DataProviderOrchestrator(googleKey)
+  const streetDir = await orchestrator.getStreets(plz)
+  const directory = { streets: streetDir.streets, complete: streetDir.complete }
 
   // Bevölkerungsdaten
   const { data: plzData } = await supabase.from('postal_codes').select('population, households, city, state').eq('postal_code', plz).single()
@@ -65,8 +68,9 @@ export async function GET(req: NextRequest) {
     _errors: [],
   }))
 
-  const plzAnalysis = analyzePLZ(rows, officialStreets, plzData?.population || null, plzData?.households || null)
-  const streetAnalysis = analyzeStreets(rows, officialStreets)
+  const plzAnalysis = analyzePLZ(rows, directory, plzData?.population || null, plzData?.households || null)
+  if (!streetDir.complete && streetDir.error) plzAnalysis.warnings.push(`⚠️ ${streetDir.error}`)
+  const streetAnalysis = analyzeStreets(rows, directory)
 
   // POIs aus DB
   const { data: pois } = await supabase.from('poi_businesses').select('*').eq('postal_code', plz)
@@ -88,6 +92,15 @@ export async function GET(req: NextRequest) {
     state: plzData?.state,
     analysis: { ...plzAnalysis, poi_summary: poiSummary },
     streets: {
+      // complete = false: Verzeichnis fehlt/unvollständig, without_orders ist
+      // dann leer und darf nicht als "0 Bestellungen" gelesen werden
+      directory: {
+        complete: streetDir.complete,
+        status: streetDir.status,
+        source: streetDir.source,
+        count: streetDir.complete ? streetDir.count : null,
+        message: streetDir.error || null,
+      },
       total: streetAnalysis.length,
       with_orders: streetAnalysis.filter(s => s.order_count > 0),
       without_orders: streetAnalysis.filter(s => s.order_count === 0),

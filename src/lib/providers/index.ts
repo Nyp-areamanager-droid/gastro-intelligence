@@ -4,9 +4,10 @@
 // =============================================================================
 
 import type {
-  OpenPLZStreet, OSMPOIResult, CensusData, PostalCode,
+  OSMPOIResult, CensusData, PostalCode,
   POIBusiness, POICategory, DataSource
 } from '@/types'
+import { getStreetDirectory, type StreetDirectoryResult } from '@/lib/geo/street-directory'
 
 const OPENPLZ_BASE = 'https://openplzapi.org/de'
 const NOMINATIM_BASE = 'https://nominatim.openstreetmap.org'
@@ -42,34 +43,12 @@ async function fetchWithRetry(url: string, options: RequestInit = {}, retries = 
 export const openplzProvider = {
   name: 'openplz' as DataSource,
 
-  async getStreetsByPostalCode(postalCode: string): Promise<OpenPLZStreet[]> {
-    const streets: OpenPLZStreet[] = []
-    let page = 1
-    const pageSize = 500
-
-    while (true) {
-      const url = `${OPENPLZ_BASE}/Streets?postalCode=${postalCode}&pageSize=${pageSize}&page=${page}`
-      try {
-        const res = await fetchWithRetry(url, {
-          headers: { Accept: 'text/json', 'User-Agent': 'GastroIntelligence/1.0' }
-        })
-        if (!res.ok) break
-        const data: OpenPLZStreet[] = await res.json()
-        if (!data?.length) break
-
-        // Deduplizieren
-        for (const item of data) {
-          if (item.name && !streets.find(s => s.name === item.name)) {
-            streets.push(item)
-          }
-        }
-        if (data.length < pageSize) break
-        page++
-      } catch {
-        break
-      }
-    }
-    return streets.sort((a, b) => a.name.localeCompare(b.name, 'de'))
+  /**
+   * Vollständiges Straßenverzeichnis einer PLZ inkl. Status.
+   * Nur status 'complete' darf als vollständige Liste verwendet werden.
+   */
+  async getStreetDirectory(postalCode: string): Promise<StreetDirectoryResult> {
+    return getStreetDirectory(postalCode)
   },
 
   async getPostalCodeInfo(postalCode: string): Promise<Partial<PostalCode> | null> {
@@ -494,26 +473,31 @@ export class DataProviderOrchestrator {
     this.googleApiKey = googleApiKey
   }
 
+  /**
+   * Straßenverzeichnis einer PLZ. `complete` ist nur true, wenn alle Seiten
+   * fehlerfrei geladen wurden. Bei false darf die Liste weder gespeichert
+   * noch für "Straßen ohne Bestellungen" genutzt werden.
+   */
   async getStreets(postalCode: string): Promise<{
     streets: string[]
+    complete: boolean
+    status: StreetDirectoryResult['status']
     source: DataSource
     count: number
     error?: string
   }> {
-    try {
-      const streets = await openplzProvider.getStreetsByPostalCode(postalCode)
-      if (streets.length > 0) {
-        return { streets: streets.map(s => s.name), source: 'openplz', count: streets.length }
-      }
-    } catch (e) {
-      console.error('OpenPLZ failed:', e)
-    }
-
+    const dir = await openplzProvider.getStreetDirectory(postalCode)
     return {
-      streets: [],
+      streets: dir.streets.map(s => s.name),
+      complete: dir.status === 'complete',
+      status: dir.status,
       source: 'openplz',
-      count: 0,
-      error: `Keine Straßen für PLZ ${postalCode} gefunden. OpenPLZ API nicht erreichbar oder PLZ unbekannt.`
+      count: dir.streets.length,
+      error: dir.status === 'complete'
+        ? undefined
+        : dir.status === 'empty'
+          ? `Für PLZ ${postalCode} liefert OpenPLZ keine Straßen.`
+          : `Straßenverzeichnis für PLZ ${postalCode} unvollständig: ${dir.reason}`,
     }
   }
 

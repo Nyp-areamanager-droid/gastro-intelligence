@@ -6,6 +6,7 @@ import { computeDashboardKPIs, generateRecommendations } from '@/lib/analysis/en
 import type { DashboardKPIs, Alert, MarketingRecommendation, PLZAnalysisResult } from '@/types'
 import Link from 'next/link'
 import { getPopulation } from '@/lib/census'
+import { fetchAllRows } from '@/lib/supabase/fetch-all'
 
 const actionColors: Record<string, string> = { sms: '#e63027', flyer: '#f5a623', b2b_visit: '#00d084', loyalty: '#2e86c1', reactivation: '#ff6b4a', coupon: '#7c6dfa' }
 
@@ -25,7 +26,10 @@ export default function DashboardPage() {
       const { data: membership } = await (supabase.from('company_users') as any).select('company_id').eq('user_id', user.id).single()
       if (!membership) return
       const companyId = membership.company_id
-      const { data: customers } = await supabase.from('customers').select('*').eq('company_id', companyId)
+      // Alle Kunden laden – ohne Paging schneidet Supabase bei 1.000 Zeilen ab
+      // und die Kennzahlen wären bei größeren Datenbeständen zu niedrig
+      const { data: customers } = await fetchAllRows((from, to) =>
+        supabase.from('customers').select('*', { count: 'exact' }).eq('company_id', companyId).order('id').range(from, to))
       const { data: dbAlerts } = await supabase.from('alerts').select('*').eq('company_id', companyId).eq('is_resolved', false).order('created_at', { ascending: false }).limit(10)
       let { data: analytics } = await supabase.from('analytics').select('*').eq('company_id', companyId).order('computed_at', { ascending: false })
       // Auto-sync Einwohner wenn noch keine Daten
@@ -63,8 +67,9 @@ export default function DashboardPage() {
             const pop = a.population || getPopulation(a.postal_code || '')
             return pop && a.customer_count ? pop - a.customer_count : null
           })(),
-          not_reached_pct: null, streets_total: a.streets_total || 0, streets_with_orders: a.streets_with_orders || 0,
-          streets_without_orders: a.streets_without_orders || 0, streets_coverage_pct: a.streets_coverage_pct || 0,
+          // null = Straßenverzeichnis fehlte → keine Aussage, nicht 0
+          not_reached_pct: null, streets_total: a.streets_total ?? null, streets_with_orders: a.streets_with_orders ?? null,
+          streets_without_orders: a.streets_without_orders ?? null, streets_coverage_pct: a.streets_coverage_pct ?? null,
           flyer_potential_eur: null, potential_scenarios: (a.potential_scenarios as PLZAnalysisResult['potential_scenarios']) || [],
           one_time_buyers: a.one_time_buyers || 0, repeat_customers: a.repeat_customers || 0,
           vip_customers: a.vip_customers || 0, warnings: [],

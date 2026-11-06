@@ -8,6 +8,7 @@ import type {
   RFMAnalysis, MarketingRecommendation, PotentialScenario,
   StreetClass, RFMSegment, ActionType, DashboardKPIs, Alert,
 } from '@/types'
+import { normalizeStreetName, stripHouseNumber, streetNameKey, resolveStreetKey } from '@/lib/geo/street-name'
 
 // ── Normalisierung ────────────────────────────────────────────────────────────
 
@@ -19,17 +20,8 @@ export function normalizePhone(raw: string): string {
   return p
 }
 
-export function normalizeStreetName(raw: string): string {
-  return raw
-    .trim()
-    .toLowerCase()
-    .replace(/\s+\d+\s*[a-z]?\s*(-\s*\d+\s*[a-z]?)?\s*$/i, '') // Hausnummer entfernen
-    .replace(/straße|strasse/g, 'str')
-    .replace(/gasse\b/g, 'g')
-    .replace(/\bplatz\b/g, 'pl')
-    .replace(/[.\-\s]+/g, '')
-    .trim()
-}
+// Straßennamen-Normalisierung liegt zentral in lib/geo/street-name.ts
+export { normalizeStreetName }
 
 export function extractHouseNumber(raw: string): { street: string; houseNumber: string } {
   const match = raw.trim().match(/^(.+?)\s+(\d+\s*[a-zA-Z]?(?:\s*[-/]\s*\d+\s*[a-zA-Z]?)?)$/)
@@ -292,9 +284,22 @@ export function aggregateRFMSegments(rows: ParsedCustomerRow[]): RFMAnalysis[] {
 
 // ── PLZ-Analyse ───────────────────────────────────────────────────────────────
 
+/**
+ * Straßenverzeichnis einer PLZ für die Analyse.
+ * complete = false heißt: Liste fehlt oder ist unvollständig. Dann gibt es
+ * keine Aussage über Straßen ohne Bestellungen (keine Klasse E, keine
+ * Abdeckungsquote).
+ */
+export interface StreetDirectory {
+  streets: string[]
+  complete: boolean
+}
+
+export const NO_STREET_DIRECTORY: StreetDirectory = { streets: [], complete: false }
+
 export function analyzePLZ(
   rows: ParsedCustomerRow[],
-  officialStreets: string[],
+  directory: StreetDirectory,
   population: number | null,
   households: number | null,
 ): PLZAnalysisResult {
@@ -314,12 +319,14 @@ export function analyzePLZ(
   const notReachedResidents = population ? population - customerCount : null
   const notReachedPct = population ? ((population - customerCount) / population) * 100 : null
 
-  // Straßen
-  const customerStreets = new Set(rows.map(r => normalizeStreetName(r.street || '')).filter(Boolean))
-  const officialNorm = officialStreets.map(s => normalizeStreetName(s))
-  const streetsWithOrders = officialNorm.filter(n => customerStreets.has(n)).length
-  const streetsWithoutOrders = officialNorm.length - streetsWithOrders
-  const streetsCovPct = officialNorm.length > 0 ? (streetsWithOrders / officialNorm.length) * 100 : 0
+  // Straßen – nur mit vollständigem Verzeichnis aussagekräftig
+  const officialNorm = [...new Set(directory.streets.map(s => streetNameKey(s)).filter(Boolean))]
+  const officialSet = new Set(officialNorm)
+  const customerStreets = new Set(rows.map(r => resolveStreetKey(r.street || '', officialSet)).filter(Boolean))
+  const hasDirectory = directory.complete && officialNorm.length > 0
+  const streetsWithOrders = hasDirectory ? officialNorm.filter(n => customerStreets.has(n)).length : null
+  const streetsWithoutOrders = hasDirectory ? officialNorm.length - streetsWithOrders! : null
+  const streetsCovPct = hasDirectory ? (streetsWithOrders! / officialNorm.length) * 100 : null
 
   // Flyer-Potenzial: (nicht erreichte EW) × 3% Konversion × Ø Bon × 3 Monate
   const flyerPotential = notReachedResidents
@@ -348,7 +355,11 @@ export function analyzePLZ(
   const warnings: string[] = []
   if (!population) warnings.push(`⚠️ Einwohnerzahl für PLZ ${postalCode} nicht verfügbar. Marktdurchdringung kann nicht berechnet werden.`)
   if (oneTimeBuyers / customerCount > 0.7) warnings.push('⚠️ Über 70% Einmalkäufer — Kundenbindung kritisch')
-  if (streetsWithoutOrders > streetsWithOrders) warnings.push(`⚠️ Nur ${Math.round(streetsCovPct)}% der Straßen erreicht`)
+  if (!hasDirectory) {
+    warnings.push(`⚠️ Straßenverzeichnis für PLZ ${postalCode} fehlt oder ist unvollständig. Straßen ohne Bestellungen werden nicht ausgewiesen.`)
+  } else if (streetsWithoutOrders! > streetsWithOrders!) {
+    warnings.push(`⚠️ Nur ${Math.round(streetsCovPct!)}% der Straßen erreicht`)
+  }
 
   return {
     postal_code: postalCode,
@@ -364,10 +375,10 @@ export function analyzePLZ(
     market_penetration_pct: marketPenetrationPct ? Math.round(marketPenetrationPct * 100) / 100 : null,
     not_reached_residents: notReachedResidents,
     not_reached_pct: notReachedPct ? Math.round(notReachedPct * 10) / 10 : null,
-    streets_total: officialStreets.length,
+    streets_total: hasDirectory ? officialNorm.length : null,
     streets_with_orders: streetsWithOrders,
     streets_without_orders: streetsWithoutOrders,
-    streets_coverage_pct: Math.round(streetsCovPct * 10) / 10,
+    streets_coverage_pct: streetsCovPct === null ? null : Math.round(streetsCovPct * 10) / 10,
     flyer_potential_eur: flyerPotential,
     potential_scenarios: scenarios,
     one_time_buyers: oneTimeBuyers,
@@ -382,63 +393,86 @@ export function analyzePLZ(
 
 export function analyzeStreets(
   rows: ParsedCustomerRow[],
-  officialStreets: string[],
+  directory: StreetDirectory,
 ): StreetAnalysisResult[] {
-  // Gruppen: Straße → Kunden-Rows
-  const streetGroups = new Map<string, ParsedCustomerRow[]>()
+  // Verzeichnis: Schlüssel → amtlicher/Quell-Name
+  const directoryByKey = new Map<string, string>()
+  for (const name of directory.streets) {
+    const key = streetNameKey(name)
+    if (key && !directoryByKey.has(key)) directoryByKey.set(key, name)
+  }
 
+  // Gruppen: PLZ + Straßenschlüssel → Kunden-Rows.
+  // Verschiedene Schreibweisen derselben Straße landen in einer Gruppe,
+  // gleichnamige Straßen in verschiedenen PLZ bleiben getrennt.
+  const groups = new Map<string, { postalCode: string; key: string; rows: ParsedCustomerRow[]; spellings: Map<string, number> }>()
+  const directoryKeys = new Set(directoryByKey.keys())
   for (const row of rows) {
     if (!row.street) continue
-    const norm = normalizeStreetName(row.street)
-    if (!norm) continue
-    const key = row.street.trim() // Original für Anzeige
-    if (!streetGroups.has(key)) streetGroups.set(key, [])
-    streetGroups.get(key)!.push(row)
+    const key = resolveStreetKey(row.street, directoryKeys)
+    if (!key) continue
+    const postalCode = row.postal_code || ''
+    const groupKey = `${postalCode}|${key}`
+    let g = groups.get(groupKey)
+    if (!g) {
+      g = { postalCode, key, rows: [], spellings: new Map() }
+      groups.set(groupKey, g)
+    }
+    g.rows.push(row)
+    const spelling = stripHouseNumber(row.street)
+    g.spellings.set(spelling, (g.spellings.get(spelling) || 0) + 1)
   }
 
   const results: StreetAnalysisResult[] = []
+  const keysWithCustomers = new Set<string>()
 
   // Straßen aus Kundendaten
-  for (const [street, group] of streetGroups) {
-    const orderCount = group.reduce((s, r) => s + r.total_orders, 0)
-    const revenue = group.reduce((s, r) => s + r.total_revenue, 0)
-    const isOfficial = officialStreets.some(s => normalizeStreetName(s) === normalizeStreetName(street))
+  for (const g of groups.values()) {
+    keysWithCustomers.add(g.key)
+    const orderCount = g.rows.reduce((s, r) => s + r.total_orders, 0)
+    const revenue = g.rows.reduce((s, r) => s + r.total_revenue, 0)
 
     // ── Kundenzahl: aggregiert vs. Einzelkunden ──────────────────────────────
     // Aggregierte CSV: Jede Zeile liefert _aggregated_customer_count (die Anzahl
     // eindeutiger Kunden laut Export). Mehrere Zeilen zur selben Straße werden
     // addiert — das ist nur erlaubt, weil der Export bereits dedupliziert ist.
-    // Einzelkunden-CSV: group.length = Anzahl der Datensätze = Kundenzahl.
-    const isAggregated = group.some(r => r._is_aggregated)
+    // Einzelkunden-CSV: Anzahl der Datensätze = Kundenzahl.
+    const isAggregated = g.rows.some(r => r._is_aggregated)
     const customerCount = isAggregated
-      ? group.reduce((s, r) => s + (r._aggregated_customer_count ?? 1), 0)
-      : group.length
+      ? g.rows.reduce((s, r) => s + (r._aggregated_customer_count ?? 1), 0)
+      : g.rows.length
 
     const avgVal = orderCount > 0 ? revenue / orderCount : 0
     const bpk = customerCount > 0 ? orderCount / customerCount : 0
 
+    // Anzeigename: Name aus dem Verzeichnis, sonst häufigste Schreibweise
+    const officialName = directoryByKey.get(g.key)
+    const mostCommon = [...g.spellings.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'de'))[0][0]
+
     results.push({
-      street_name: street,
-      postal_code: group[0]?.postal_code || '',
+      street_name: officialName || mostCommon,
+      postal_code: g.postalCode,
       customer_count: customerCount,
       order_count: orderCount,
       revenue: Math.round(revenue * 100) / 100,
       avg_order_value: Math.round(avgVal * 100) / 100,
       orders_per_customer: Math.round(bpk * 100) / 100,
       street_class: classifyStreet(customerCount, orderCount),
-      is_in_official_list: isOfficial,
+      // Ohne vollständiges Verzeichnis ist "nicht enthalten" keine Aussage
+      is_in_official_list: directory.complete ? directoryByKey.has(g.key) : null,
       recommendation: getStreetRecommendation(customerCount, orderCount),
     })
   }
 
-  // Offizielle Straßen ohne Kunden
-  for (const officialStreet of officialStreets) {
-    const norm = normalizeStreetName(officialStreet)
-    const hasCustomers = [...streetGroups.keys()].some(k => normalizeStreetName(k) === norm)
-    if (!hasCustomers) {
-      const plz = rows[0]?.postal_code || ''
+  // Straßen ohne Kunden: NUR bei vollständigem Verzeichnis.
+  // Fehlt das Verzeichnis oder ist es unvollständig, wird keine Straße als
+  // "0 Bestellungen" ausgewiesen.
+  if (directory.complete) {
+    const plz = rows[0]?.postal_code || ''
+    for (const [key, name] of directoryByKey) {
+      if (keysWithCustomers.has(key)) continue
       results.push({
-        street_name: officialStreet,
+        street_name: name,
         postal_code: plz,
         customer_count: 0,
         order_count: 0,
@@ -615,7 +649,9 @@ export function generateRecommendations(
     const fp = Math.round((weakPLZ.population || 5000) * 0.025 * bon * 3)
     recs.push({
       action_type: 'flyer', title: `Flyer-Offensive PLZ ${weakPLZ.postal_code}`,
-      description: `${weakPLZ.not_reached_residents?.toLocaleString('de-DE')} Einwohner noch nie kontaktiert. ${weakPLZ.streets_without_orders} Straßen ohne Bestellung.`,
+      // Straßenzahl nur nennen, wenn das Verzeichnis vollständig war (sonst null)
+      description: `${weakPLZ.not_reached_residents?.toLocaleString('de-DE')} Einwohner noch nie kontaktiert.` +
+        (typeof weakPLZ.streets_without_orders === 'number' ? ` ${weakPLZ.streets_without_orders} Straßen ohne Bestellung.` : ''),
       target: `PLZ ${weakPLZ.postal_code} — ${weakPLZ.city}`,
       estimated_cost: fc, estimated_potential: fp,
       roi: Math.round(fp / fc), priority: 1, timeframe: 'Woche 1–2',

@@ -306,11 +306,11 @@ export interface PLZAnalysisResult {
   market_penetration_pct: number | null
   not_reached_residents: number | null
   not_reached_pct: number | null
-  // Straßen
-  streets_total: number
-  streets_with_orders: number
-  streets_without_orders: number
-  streets_coverage_pct: number
+  // Straßen (null = Straßenverzeichnis fehlt oder unvollständig → keine Aussage)
+  streets_total: number | null
+  streets_with_orders: number | null
+  streets_without_orders: number | null
+  streets_coverage_pct: number | null
   // Potenzial
   flyer_potential_eur: number | null
   potential_scenarios: PotentialScenario[]
@@ -350,7 +350,8 @@ export interface StreetAnalysisResult {
   avg_order_value: number
   orders_per_customer: number
   street_class: StreetClass
-  is_in_official_list: boolean
+  /** null = Verzeichnis unvollständig, keine Aussage möglich */
+  is_in_official_list: boolean | null
   recommendation: string
 }
 

@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
+import { normalizeStreetName, streetNameKey } from '@/lib/geo/street-name'
 
 // Typen nur im Client
 interface MapMarkerData {
@@ -21,7 +22,7 @@ interface StreetAnalyticsEntry {
   avg_order_value: number
   orders_per_customer: number
   street_class: 'A' | 'B' | 'C' | 'D' | 'E' | null
-  is_in_official_list: boolean
+  is_in_official_list: boolean | null
 }
 
 interface MapProps {
@@ -37,21 +38,9 @@ interface MapProps {
   showPlzBoundaries?: boolean // Neue Option: PLZ-Grenzen einblenden
 }
 
-/**
- * Normalisiert einen Straßennamen für den Lookup in street_analytics.
- * Muss identisch mit engine.ts normalizeStreetName() sein.
- */
-function normalizeForLookup(raw: string): string {
-  return raw
-    .trim()
-    .toLowerCase()
-    .replace(/\s+\d+\s*[a-z]?\s*(-\s*\d+\s*[a-z]?)?\s*$/i, '') // Hausnummer entfernen
-    .replace(/straße|strasse/g, 'str')
-    .replace(/gasse\b/g, 'g')
-    .replace(/\bplatz\b/g, 'pl')
-    .replace(/[.\-\s]+/g, '')
-    .trim()
-}
+// Gleicher Vergleichsschlüssel wie Straßenverzeichnis (Kartennamen haben
+// keine Hausnummer, "Weg 2" bleibt "weg2")
+const normalizeForLookup = streetNameKey
 
 /** Farbe für Straßenklasse A–E aus street_analytics */
 function classColor(cls: string | null): string | null {
@@ -154,6 +143,9 @@ export function AnalysisMap({
             const lookup = new Map<string, StreetAnalyticsEntry>()
             for (const s of (saData.streets || []) as StreetAnalyticsEntry[]) {
               lookup.set(normalizeForLookup(s.street_name), s)
+              // Ältere Analysen speicherten den Namen mit Hausnummer
+              const legacyKey = normalizeStreetName(s.street_name)
+              if (!lookup.has(legacyKey)) lookup.set(legacyKey, s)
             }
             setStreetAnalytics(lookup)
           }

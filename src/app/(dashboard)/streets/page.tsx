@@ -26,6 +26,9 @@ export default function StreetsPage() {
   const [search, setSearch] = useState('')
   const [info, setInfo] = useState<{ postal_code: string|null, population: number|null, customer_count: number|null, order_count: number|null, streets_total: number|null, streets_with_orders: number|null } | null>(null)
   const supabase = createClient()
+  // Status des Straßenverzeichnisses: ohne vollständige Liste keine Aussage
+  // über Straßen ohne Bestellungen
+  const [directory, setDirectory] = useState<{ complete: boolean; message: string | null } | null>(null)
 
   useEffect(() => {
     async function loadPLZ() {
@@ -52,6 +55,7 @@ export default function StreetsPage() {
   async function loadStreets(plz: string) {
     setLoading(true)
     setStreets([])
+    setDirectory(null)
     const res = await fetch(`/api/analysis/plz?plz=${plz}`)
     if (!res.ok) { setLoading(false); return }
     const data = await res.json()
@@ -63,6 +67,7 @@ export default function StreetsPage() {
       name: s.street_name, customers: 0, orders: 0, revenue: 0, streetClass: 'E',
     }))
     setStreets([...withOrders, ...withoutOrders])
+    setDirectory(data.streets?.directory || null)
     if (data.analysis) {
       setInfo({ postal_code: selectedPLZ, population: data.analysis.population, customer_count: data.analysis.customer_count, order_count: data.analysis.order_count, streets_total: data.analysis.streets_total, streets_with_orders: data.analysis.streets_with_orders })
     }
@@ -111,7 +116,7 @@ export default function StreetsPage() {
           {[
             { label:'Straßen total', value: streets.length || info.streets_total || 0, color:'#2e86c1' },
             { label:'✅ Mit Bestellungen', value: withOrders, color:'#00d084' },
-            { label:'❌ Ohne Kontakt', value: noOrders, color:'#e63027' },
+            { label:'❌ Ohne Kontakt', value: directory?.complete ? noOrders : '—', color:'#e63027' },
             { label:'👥 Einwohner', value: info.population ? info.population.toLocaleString('de-DE') : '—', color:'#f5a623' },
             { label:'📊 % bestellen bei uns', value: mktPct ? mktPct.toFixed(2)+'%' : '—', color: mktPct && mktPct>2?'#00d084':'#e63027' },
             { label:'🔴 Nicht erreicht', value: info.population && info.customer_count ? (info.population-info.customer_count).toLocaleString('de-DE') : '—', color:'#f87171' },
@@ -121,6 +126,13 @@ export default function StreetsPage() {
               <div style={{ fontSize:'20px', fontWeight:700, color:k.color, fontFamily:'monospace' }}>{k.value}</div>
             </div>
           ))}
+        </div>
+      )}
+
+      {directory && !directory.complete && (
+        <div role="status" style={{ background:'rgba(245,166,35,0.08)', border:'1px solid rgba(245,166,35,0.4)', borderRadius:'10px', padding:'12px 16px', marginBottom:'24px', fontSize:'13px', color:'#f5c26b' }}>
+          Straßenverzeichnis für diese PLZ fehlt oder ist unvollständig. Angezeigt werden nur Straßen mit Bestellungen. Straßen ohne Bestellungen werden erst ausgewiesen, wenn die vollständige Liste vorliegt.
+          {directory.message ? <div style={{ marginTop:'4px', fontSize:'12px', color:'#8a9bb5' }}>{directory.message}</div> : null}
         </div>
       )}
 

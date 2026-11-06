@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createServerSupabaseClient } from '@/lib/supabase/server'
+import { fetchAllRows } from '@/lib/supabase/fetch-all'
 
 /**
  * GET /api/analysis/streets?plz=50670
@@ -47,16 +48,21 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ plz, streets: [] })
   }
 
-  // Straßen-Analytics für diesen analytics-Eintrag
-  const { data: streets, error } = await supabase
-    .from('street_analytics')
-    .select(
-      'street_name, customer_count, order_count, revenue, ' +
-      'avg_order_value, orders_per_customer, street_class, is_in_official_list'
-    )
-    .eq('analytics_id', analytics.id)
-    .eq('company_id', companyId)
-    .order('order_count', { ascending: false })
+  // Straßen-Analytics für diesen analytics-Eintrag – alle Seiten laden,
+  // seit alle Straßen einer PLZ gespeichert werden (früher max. 200)
+  const { data: streets, error } = await fetchAllRows((from, to) =>
+    supabase
+      .from('street_analytics')
+      .select(
+        'street_name, customer_count, order_count, revenue, ' +
+        'avg_order_value, orders_per_customer, street_class, is_in_official_list',
+        { count: 'exact' }
+      )
+      .eq('analytics_id', analytics.id)
+      .eq('company_id', companyId)
+      .order('order_count', { ascending: false })
+      .order('id')
+      .range(from, to))
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 })

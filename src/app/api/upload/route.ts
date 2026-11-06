@@ -5,8 +5,10 @@ import { resolveCompanyContext, canWriteCompanyData, sanitizeStorageFileName } f
 import {
   detectColumns, parseAndCleanRows, computeRFM,
   computeDashboardKPIs, generateAlerts, generateRecommendations,
-  analyzeStreets, analyzePLZ, normalizeStreetName
+  analyzeStreets, analyzePLZ, NO_STREET_DIRECTORY
 } from '@/lib/analysis/engine'
+import { streetNameKey } from '@/lib/geo/street-name'
+import { readWorkbook } from '@/lib/import/read-table'
 import { DataProviderOrchestrator, censusProvider } from '@/lib/providers'
 import { getPopulation } from '@/lib/census'
 import type { ParsedCustomerRow } from '@/types'
@@ -93,7 +95,7 @@ export async function POST(req: NextRequest) {
     }
 
     // ── 3. Excel parsen ───────────────────────────────────────────────────────
-    const workbook = XLSX.read(fileBuffer, { type: 'array', cellDates: true })
+    const workbook = readWorkbook(fileBuffer, file.name, file.type)
     const worksheet = workbook.Sheets[workbook.SheetNames[0]]
     const rawRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: '' })
 
@@ -173,45 +175,38 @@ export async function POST(req: NextRequest) {
     const plzAnalyses = []
 
     for (const [plz, plzRows] of plzGroups) {
-      // Straßen aus DB oder live
-      let officialStreets: string[] = []
-      const { data: dbStreets } = await supabase
-        .from('streets')
-        .select('name')
-        .eq('postal_code', plz)
+      // Straßenverzeichnis live laden (vollständig oder ausdrücklich unvollständig).
+      // Der gespeicherte Straßen-Cache wird hier bewusst NICHT gelesen: Er hat
+      // keine Kennzeichnung, ob er vollständig ist (siehe Konzept, neue Tabelle).
+      const streetDir = await orchestrator.getStreets(plz)
+      const directory = { streets: streetDir.streets, complete: streetDir.complete }
 
-      if (dbStreets && dbStreets.length > 0) {
-        officialStreets = dbStreets.map(s => s.name)
-      } else {
-        // Live aus OpenPLZ
-        const result = await orchestrator.getStreets(plz)
-        officialStreets = result.streets
+      // Nur vollständige Listen speichern
+      if (streetDir.complete) {
+        const plzInfo = await orchestrator.getPostalCodeData(plz)
+        await supabase.from('postal_codes').upsert({
+          postal_code: plz,
+          city: plzInfo.info.city || plzRows[0]?.city || plz,
+          state: plzInfo.info.state || null,
+          data_source: plzInfo.info.data_source || 'openplz',
+          last_fetched_at: new Date().toISOString(),
+        }, { onConflict: 'postal_code' })
 
-        // Straßen in DB cachen
-        if (officialStreets.length > 0) {
-          // PLZ erst sicherstellen
-          const plzInfo = await orchestrator.getPostalCodeData(plz)
-          await supabase.from('postal_codes').upsert({
-            postal_code: plz,
-            city: plzInfo.info.city || plzRows[0]?.city || plz,
-            state: plzInfo.info.state || null,
-            population: plzInfo.census?.population || null,
-            households: plzInfo.census?.households || null,
-            population_year: plzInfo.census?.year || null,
-            data_source: plzInfo.info.data_source || 'openplz',
-            trust_level: plzInfo.census?.trust_level || 'public',
-            last_fetched_at: new Date().toISOString(),
-          }, { onConflict: 'postal_code' })
-
-          // Straßen einfügen
-          const streetRecords = officialStreets.map(name => ({
-            postal_code: plz,
-            name,
-            name_normalized: normalizeStreetName(name),
-            data_source: 'openplz' as const,
-            last_fetched_at: new Date().toISOString(),
-          }))
-          await supabase.from('streets').upsert(streetRecords, { onConflict: 'postal_code,name_normalized', ignoreDuplicates: true })
+        // Liste der PLZ ersetzen: Alte (evtl. gekürzte) Einträge entfernen,
+        // vollständige Liste neu schreiben.
+        const fetchedAt = new Date().toISOString()
+        const cacheRecords = streetDir.streets.map(name => ({
+          postal_code: plz,
+          name,
+          name_normalized: streetNameKey(name),
+          data_source: 'openplz' as const,
+          last_fetched_at: fetchedAt,
+        }))
+        const { error: deleteError } = await supabase.from('streets').delete().eq('postal_code', plz)
+        if (!deleteError) {
+          for (let i = 0; i < cacheRecords.length; i += 500) {
+            await supabase.from('streets').upsert(cacheRecords.slice(i, i + 500), { onConflict: 'postal_code,name_normalized', ignoreDuplicates: true })
+          }
         }
       }
 
@@ -248,14 +243,15 @@ export async function POST(req: NextRequest) {
 
       const analysis = analyzePLZ(
         plzRows,
-        officialStreets,
+        directory,
         population,
         households,
       )
+      if (!streetDir.complete && streetDir.error) analysis.warnings.push(`⚠️ ${streetDir.error}`)
       plzAnalyses.push(analysis)
 
       // Straßen-Analyse
-      const streetResults = analyzeStreets(plzRows, officialStreets)
+      const streetResults = analyzeStreets(plzRows, directory)
 
       // Analytics in DB speichern (alte Einträge für diese PLZ+Company entfernen um Duplikate zu vermeiden)
       await supabase.from('analytics').delete().eq('company_id', companyId).eq('postal_code', plz)
@@ -291,14 +287,16 @@ export async function POST(req: NextRequest) {
         .select()
         .single()
 
-      // Straßen-Analytics speichern
+      // Straßen-Analytics speichern: alle Straßen, auch ohne Bestellungen
+      // (früher nur die ersten 200 nach Bestellungen – Straßen ohne
+      // Bestellungen fielen dabei als erste weg)
       if (analyticsRecord) {
-        const streetRecords = streetResults.slice(0, 200).map(s => ({
+        const streetRecords = streetResults.map(s => ({
           analytics_id: analyticsRecord.id,
           company_id: companyId,
           postal_code: plz,
           street_name: s.street_name,
-          street_name_normalized: normalizeStreetName(s.street_name),
+          street_name_normalized: streetNameKey(s.street_name),
           customer_count: s.customer_count,
           order_count: s.order_count,
           revenue: s.revenue,
@@ -307,13 +305,15 @@ export async function POST(req: NextRequest) {
           street_class: s.street_class,
           is_in_official_list: s.is_in_official_list,
         }))
-        await supabase.from('street_analytics').insert(streetRecords)
+        for (let i = 0; i < streetRecords.length; i += 500) {
+          await supabase.from('street_analytics').insert(streetRecords.slice(i, i + 500))
+        }
       }
     }
 
     // ── 8. Dashboard KPIs + Alerts + Empfehlungen ─────────────────────────────
     const kpis = computeDashboardKPIs(rowsWithRFM)
-    const streetResultsAll = rowsWithRFM.length > 0 ? analyzeStreets(rowsWithRFM, []) : []
+    const streetResultsAll = rowsWithRFM.length > 0 ? analyzeStreets(rowsWithRFM, NO_STREET_DIRECTORY) : []
     const recs = generateRecommendations(kpis, plzAnalyses, streetResultsAll)
     const alertPayloads = generateAlerts(kpis)
 

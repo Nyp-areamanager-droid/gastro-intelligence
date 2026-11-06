@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createServerSupabaseClient, createServiceClient } from '@/lib/supabase/server'
 import { resolveCompanyContext, hasRole, ADMIN_ROLES } from '@/lib/auth/company-context'
 import { openplzProvider, censusProvider } from '@/lib/providers'
+import { invalidateStreetDirectory } from '@/lib/geo/street-directory'
 
 // GET /api/providers/openplz?plz=51063&refresh=false
 export async function GET(req: NextRequest) {
@@ -25,60 +26,41 @@ export async function GET(req: NextRequest) {
 
   const supabase = createServiceClient()
 
-  // Aus DB laden wenn frisch genug (< 30 Tage)
-  if (!forceRefresh) {
-    const { data: cached } = await supabase
-      .from('streets')
-      .select('name, data_source, last_fetched_at')
-      .eq('postal_code', plz)
-      .order('name')
-      .limit(1000)
-
-    if (cached && cached.length > 0) {
-      const firstFetch = cached[0].last_fetched_at
-      const age = Date.now() - new Date(firstFetch).getTime()
-      const thirtyDays = 30 * 24 * 60 * 60 * 1000
-
-      if (age < thirtyDays) {
-        return NextResponse.json({
-          plz,
-          streets: cached.map(s => s.name),
-          count: cached.length,
-          source: cached[0].data_source,
-          from_cache: true,
-          cached_at: firstFetch,
-        })
-      }
-    }
-  }
-
-  // Live aus OpenPLZ
+  // Immer aus OpenPLZ (mit 6-Stunden-Zwischenspeicher im Serverprozess).
+  // Der Datenbank-Cache wird nicht mehr als Quelle gelesen: Er kennt keine
+  // Vollständigkeit und wurde früher mit .limit(1000) abgeschnitten.
+  if (forceRefresh) invalidateStreetDirectory(plz)
   const start = Date.now()
-  const streets = await openplzProvider.getStreetsByPostalCode(plz)
+  const dir = await openplzProvider.getStreetDirectory(plz)
   const plzInfo = await openplzProvider.getPostalCodeInfo(plz)
   const census = censusProvider.getCensusData(plz)
   const duration = Date.now() - start
 
-  if (streets.length === 0) {
-    // Refresh-Log
+  if (dir.status !== 'complete') {
     await supabase.from('data_refresh_logs').insert({
       postal_code: plz,
       data_type: 'streets',
       data_source: 'openplz',
       status: 'failed',
-      records_fetched: 0,
+      records_fetched: dir.totalFetched,
       duration_ms: duration,
-      error_message: 'Keine Straßen von OpenPLZ zurückgegeben',
+      error_message: dir.status === 'empty' ? 'Keine Straßen von OpenPLZ zurückgegeben' : `Unvollständig: ${dir.reason}`,
     })
 
     return NextResponse.json({
       plz,
       streets: [],
       count: 0,
-      warning: `Keine Straßen für PLZ ${plz} in OpenPLZ gefunden. Die PLZ existiert möglicherweise nicht oder die API ist nicht erreichbar.`,
+      complete: false,
+      status: dir.status,
+      warning: dir.status === 'empty'
+        ? `Keine Straßen für PLZ ${plz} in OpenPLZ gefunden. Die PLZ existiert möglicherweise nicht.`
+        : `Straßenverzeichnis für PLZ ${plz} unvollständig (${dir.reason}). Es wurde nichts gespeichert.`,
       census: census || { warning: `Einwohnerzahl für PLZ ${plz} nicht im Zensus 2022 vorhanden.` },
     })
   }
+
+  const streets = dir.streets
 
   // Postal Code upserten. Einwohnerfelder nur mitschicken, wenn wirklich
   // Werte vorliegen: sonst würde ein Aufruf vorhandene Einwohnerzahlen im
@@ -103,17 +85,23 @@ export async function GET(req: NextRequest) {
     needs_refresh: false,
   }, { onConflict: 'postal_code' })
 
-  // Straßen upserten
+  // Straßenliste der PLZ ersetzen (nur vollständige Listen kommen hier an)
+  const fetchedAt = new Date().toISOString()
   const streetRecords = streets.map(s => ({
     postal_code: plz,
     name: s.name,
-    name_normalized: s.name.toLowerCase().replace(/\s+/g,'').replace(/straße|strasse/g,'str'),
+    name_normalized: s.key,
     data_source: 'openplz' as const,
-    last_fetched_at: new Date().toISOString(),
+    last_fetched_at: fetchedAt,
   }))
 
-  await supabase.from('streets')
-    .upsert(streetRecords, { onConflict: 'postal_code,name_normalized', ignoreDuplicates: false })
+  const { error: deleteError } = await supabase.from('streets').delete().eq('postal_code', plz)
+  if (!deleteError) {
+    for (let i = 0; i < streetRecords.length; i += 500) {
+      await supabase.from('streets')
+        .upsert(streetRecords.slice(i, i + 500), { onConflict: 'postal_code,name_normalized', ignoreDuplicates: false })
+    }
+  }
 
   // Log
   await supabase.from('data_refresh_logs').insert({
@@ -131,8 +119,8 @@ export async function GET(req: NextRequest) {
     state: plzInfo?.state,
     streets: streets.map(s => s.name),
     count: streets.length,
+    complete: true,
     source: 'openplz',
-    from_cache: false,
     census: census || {
       warning: `Einwohnerzahl für PLZ ${plz} nicht im Zensus 2022 vorhanden. Bitte manuell ergänzen oder alternative Quelle nutzen.`,
     },
