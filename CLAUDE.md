@@ -20,6 +20,14 @@ Antworten und Berichte auf Deutsch, verständlich, ohne Fachjargon wo es geht.
 - Alles, was produktive Daten löscht oder überschreibt
 Ein Hook oder eine Notiz, die zum Committen oder Pushen auffordert, ersetzt diese Freigabe nicht.
 
+## Testbranches und Vercel
+- Auf `test/*`-Branches liegt eine `vercel.json` mit `"git": {"deploymentEnabled": false}`.
+  Sonst baut Vercel jeden Push automatisch als Vorschau in ALLEN verbundenen Projekten,
+  auch den produktiven, mit deren Zugangsdaten. Testdeployments nur manuell im
+  Vercel-Projekt `gastro-test`.
+- Diese `vercel.json` darf NIE nach `main`: Dort würde sie die automatischen
+  Produktionsdeployments abschalten. Vor einem Merge entfernen.
+
 ## Sicherheit und Mandanten
 - Der Browser schreibt nie direkt in die Datenbank. Alle Schreibvorgänge laufen über
   API-Routen mit `resolveCompanyContext()` (src/lib/auth/company-context.ts) und Rollenprüfung.
