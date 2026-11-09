@@ -362,7 +362,8 @@ export interface MarketingRecommendation {
   target: string
   estimated_cost: number
   estimated_potential: number
-  roi: number
+  /** Potenzial / Kosten; null = Maßnahme ohne Kosten (kein sinnvoller Faktor) */
+  roi: number | null
   priority: number
   timeframe: string
 }

@@ -12,6 +12,7 @@ interface UploadResult {
     valid_rows: number
     duplicate_rows: number
     error_rows: number
+    invalid_value_rows?: number
     unique_plz: number
     period: { start: string | null; end: string | null }
   }
@@ -47,7 +48,11 @@ export function FileUploader() {
 
     const { data: membership } = await supabase
       .from('company_users').select('company_id').eq('user_id', user.id).single()
-    if (!membership) { setStatus('error'); return }
+    if (!membership) {
+      setStatus('error')
+      setResult({ success: false, error: 'Ihrem Konto ist noch kein Unternehmen zugeordnet. Bitte melden Sie sich einmal ab und wieder an.' })
+      return
+    }
 
     const formData = new FormData()
     formData.append('file', file)
@@ -60,7 +65,18 @@ export function FileUploader() {
     try {
       const res = await fetch('/api/upload', { method: 'POST', body: formData })
       setProgress(90)
-      const data: UploadResult = await res.json()
+      // Antwort kann ohne JSON kommen, z. B. wenn die Datei für den Server zu groß ist
+      let data: UploadResult
+      try {
+        data = await res.json()
+      } catch {
+        data = {
+          success: false,
+          error: res.status === 413
+            ? 'Die Datei ist zu groß. Bitte teilen Sie sie auf (zum Beispiel nach Monaten) oder speichern Sie sie als CSV.'
+            : 'Der Server hat nicht wie erwartet geantwortet. Bitte versuchen Sie es erneut.',
+        }
+      }
 
       if (data.success) {
         setStatus('done')
@@ -72,7 +88,7 @@ export function FileUploader() {
       }
     } catch (err) {
       setStatus('error')
-      setResult({ success: false, error: String(err) })
+      setResult({ success: false, error: 'Die Verbindung wurde unterbrochen. Bitte prüfen Sie Ihre Internetverbindung und versuchen Sie es erneut.' })
     }
   }, [])
 
@@ -157,6 +173,17 @@ export function FileUploader() {
             <SummaryCard label="PLZ-Gebiete" value={result.summary.unique_plz} color="text-blue-400" />
             <SummaryCard label="Empfehlungen" value={result.recommendations || 0} color="text-brand-red" />
           </div>
+
+          {(result.summary.error_rows > 0 || (result.summary.invalid_value_rows ?? 0) > 0) && (
+            <div className="card text-sm text-amber-300 space-y-1">
+              {result.summary.error_rows > 0 && (
+                <div>{result.summary.error_rows.toLocaleString('de-DE')} Zeilen wurden nicht übernommen, weil keine gültige Postleitzahl angegeben war.</div>
+              )}
+              {(result.summary.invalid_value_rows ?? 0) > 0 && (
+                <div>{(result.summary.invalid_value_rows ?? 0).toLocaleString('de-DE')} Zeilen enthielten einen unlesbaren Umsatz oder eine unlesbare Bestellanzahl. Diese Werte wurden als 0 € bzw. 1 Bestellung gezählt.</div>
+              )}
+            </div>
+          )}
 
           {result.summary.period.start && (
             <div className="card text-sm text-[#8a9bb5]">

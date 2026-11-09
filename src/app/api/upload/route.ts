@@ -74,7 +74,8 @@ export async function POST(req: NextRequest) {
       .upload(storagePath, fileBuffer, { contentType: file.type })
 
     if (storageError) {
-      return NextResponse.json({ error: `Upload-Fehler: ${storageError.message}` }, { status: 500 })
+      console.error('Storage-Upload fehlgeschlagen:', storageError.message)
+      return NextResponse.json({ error: 'Die Datei konnte nicht gespeichert werden. Bitte versuchen Sie es erneut.' }, { status: 500 })
     }
 
     // ── 2. Upload-Datensatz erstellen ─────────────────────────────────────────
@@ -104,7 +105,7 @@ export async function POST(req: NextRequest) {
 
     if (!rawRows.length) {
       await supabase.from('uploads').update({ status: 'failed', error_message: 'Datei leer' }).eq('id', upload.id)
-      return NextResponse.json({ error: 'Datei enthält keine Daten' }, { status: 400 })
+      return NextResponse.json({ error: 'Die Datei enthält keine Datenzeilen, nur eine Kopfzeile oder gar nichts.' }, { status: 400 })
     }
 
     // ── 4. Spalten erkennen ───────────────────────────────────────────────────
@@ -116,11 +117,14 @@ export async function POST(req: NextRequest) {
         status: 'failed',
         error_message: 'Keine PLZ-Spalte erkannt. Bitte Spalten manuell zuordnen.'
       }).eq('id', upload.id)
-      return NextResponse.json({ error: 'Keine PLZ-Spalte erkannt', headers, detected: columnMapping }, { status: 422 })
+      return NextResponse.json({
+        error: 'In der Datei wurde keine Spalte mit Postleitzahlen gefunden. Bitte eine Spalte „PLZ“ ergänzen und erneut hochladen.',
+        headers, detected: columnMapping,
+      }, { status: 422 })
     }
 
     // ── 5. Bereinigung + RFM ──────────────────────────────────────────────────
-    const { rows: cleanedRows, duplicates, errors } = parseAndCleanRows(rawRows, columnMapping)
+    const { rows: cleanedRows, duplicates, errors, invalid_values: invalidValues } = parseAndCleanRows(rawRows, columnMapping)
     const rowsWithRFM = computeRFM(cleanedRows)
 
     // Datumsbereich
@@ -320,6 +324,16 @@ export async function POST(req: NextRequest) {
     const recs = generateRecommendations(kpis, plzAnalyses, streetResultsAll)
     const alertPayloads = generateAlerts(kpis)
 
+    // Alte, noch offene Warnungen und unbearbeitete Empfehlungen werden durch
+    // die neuen ersetzt. Sonst stehen nach mehreren Uploads dieselben Warnungen
+    // mehrfach und mit veralteten Zahlen im Dashboard.
+    await supabase.from('alerts')
+      .update({ is_resolved: true, resolved_at: new Date().toISOString() })
+      .eq('company_id', companyId).eq('is_resolved', false)
+    await supabase.from('marketing_actions')
+      .update({ status: 'replaced' })
+      .eq('company_id', companyId).eq('status', 'recommended')
+
     // Alerts speichern
     if (alertPayloads.length) {
       await supabase.from('alerts').insert(
@@ -363,6 +377,7 @@ export async function POST(req: NextRequest) {
         valid_rows: rowsWithRFM.length,
         duplicate_rows: duplicates,
         error_rows: errors,
+        invalid_value_rows: invalidValues,
         unique_plz: plzGroups.size,
         period: { start: periodStart, end: periodEnd },
       },
@@ -375,7 +390,7 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     console.error('Upload processing error:', err)
     return NextResponse.json(
-      { error: 'Interner Fehler bei der Verarbeitung', details: String(err) },
+      { error: 'Bei der Auswertung ist ein Fehler aufgetreten. Bitte versuchen Sie es erneut. Bleibt der Fehler, prüfen Sie bitte das Dateiformat.' },
       { status: 500 }
     )
   }

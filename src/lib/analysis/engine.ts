@@ -83,7 +83,7 @@ export function detectColumns(headers: string[]): Record<string, string> {
     ['city',          ['ort','stadt','city','place','location']],
     ['total_orders',  ['bestellungen','orders','anzahl','total orders','gesamtbestellungen','gesamtzahl']],
     ['total_revenue', ['umsatz','revenue','gesamtbestellwert','total','betrag','wert']],
-    ['avg_order_value',['durchschnitt','average','bon','avg','ø']],
+    ['avg_order_value',['durchschnitt','average','bon','avg','ø','ø bestellwert','ø umsatz','mittlerer bestellwert']],
     ['last_order_date',['datum','date','letzte','letzter','last order','bestelldatum']],
     ['platform',      ['plattform','platform','kanal','source','quelle']],
     ['store',         ['filiale','store','standort','branch','niederlassung']],
@@ -91,18 +91,34 @@ export function detectColumns(headers: string[]): Record<string, string> {
     ['is_vip',        ['vip','premium','loyal','stammkunde']],
     // Aggregierte CSV: Anzahl eindeutiger Kunden je Straße/PLZ
     ['customer_count',['kunden','kundenanzahl','unique kunden','unique customers','anzahl kunden','eindeutige kunden']],
+    // Spalten, die bewusst KEINEM Feld zugeordnet werden (sonst würde z. B.
+    // „Kundennummer“ als Kundenanzahl gelesen)
+    ['_ignore',       ['kundennummer','kunden-nr','kundennr','customer id','bestellnummer','order id','bestell-nr']],
   ]
 
-  const usedColumns = new Set<string>()
-  for (const h of headers) {
+  // Jede Spalte bekommt das Feld mit dem GENAUESTEN (längsten) passenden
+  // Stichwort. Früher gewann das erste Feld der Liste: „Standort“ enthält „ort“
+  // und wurde zur Stadt, „Kundenanzahl“ enthält „anzahl“ und wurde zu den
+  // Bestellungen, „Ø Bestellwert“ enthält „wert“ und wurde zum Umsatz.
+  const candidates = headers.map((h, index) => {
     const l = lower(h)
+    const matches: { field: string; len: number }[] = []
     for (const [field, keywords] of rules) {
-      if (!map[field] && !usedColumns.has(h) && keywords.some(k => l.includes(k))) {
-        map[field] = h
-        usedColumns.add(h)
-      }
+      const best = Math.max(0, ...keywords.filter(k => l.includes(k)).map(k => k.length))
+      if (best > 0) matches.push({ field, len: best })
     }
+    matches.sort((a, b) => b.len - a.len)
+    return { h, index, matches }
+  }).filter(c => c.matches.length > 0)
+
+  // Spalten mit dem eindeutigsten Treffer zuerst vergeben, bei Gleichstand die
+  // weiter links stehende Spalte
+  candidates.sort((a, b) => b.matches[0].len - a.matches[0].len || a.index - b.index)
+  for (const c of candidates) {
+    const free = c.matches.find(m => !map[m.field])
+    if (free) map[free.field] = c.h
   }
+  delete map['_ignore']
   return map
 }
 
@@ -111,11 +127,14 @@ export function detectColumns(headers: string[]): Record<string, string> {
 export function parseAndCleanRows(
   rawRows: Record<string, unknown>[],
   columnMapping: Record<string, string>
-): { rows: ParsedCustomerRow[]; duplicates: number; errors: number } {
+): { rows: ParsedCustomerRow[]; duplicates: number; errors: number; invalid_values: number } {
   const seen = new Set<string>()
   const result: ParsedCustomerRow[] = []
   let duplicates = 0
   let errors = 0
+  // Zeilen mit unlesbaren Zahlen (z. B. Umsatz „abc“): werden übernommen, der
+  // Wert zählt als 0 bzw. 1 Bestellung – aber das wird jetzt gemeldet
+  let invalidValues = 0
 
   for (let i = 0; i < rawRows.length; i++) {
     const row = rawRows[i]
@@ -175,9 +194,15 @@ export function parseAndCleanRows(
     // Bestellstatistiken
     const ordersRaw = parseLocaleNumber(get('total_orders'))
     parsed.total_orders = isNaN(ordersRaw) || ordersRaw < 1 ? 1 : Math.round(ordersRaw)
+    let invalid = columnMapping['total_orders'] !== undefined && get('total_orders') !== '' && isNaN(ordersRaw)
 
     const revenueRaw = parseLocaleNumber(get('total_revenue'))
     parsed.total_revenue = isNaN(revenueRaw) ? 0 : Math.round(revenueRaw * 100) / 100
+    if (columnMapping['total_revenue'] !== undefined && get('total_revenue') !== '' && isNaN(revenueRaw)) invalid = true
+    if (invalid) {
+      parsed._errors.push('Unlesbarer Zahlenwert bei Bestellungen oder Umsatz')
+      invalidValues++
+    }
 
     const bonRaw = parseLocaleNumber(get('avg_order_value'))
     parsed.avg_order_value = isNaN(bonRaw)
@@ -225,7 +250,7 @@ export function parseAndCleanRows(
     result.push(parsed)
   }
 
-  return { rows: result, duplicates, errors }
+  return { rows: result, duplicates, errors, invalid_values: invalidValues }
 }
 
 function parseDateString(raw: string): string | undefined {
@@ -589,8 +614,10 @@ export function generateAlerts(
     is_resolved: false })
 
   // Einmalkäufer-Rate
-  const oneTimePct = current.total_customers > 0
-    ? (current.total_customers - current.total_orders) / current.total_customers * 100 : 0
+  // Anteil der Kunden mit genau einer Bestellung (= 100 % minus Stammkunden).
+  // Früher: (Kunden − Bestellungen) / Kunden – fast immer negativ, die Warnung
+  // erschien dadurch nie.
+  const oneTimePct = current.total_customers > 0 ? 100 - current.repeat_rate_pct : 0
 
   if (oneTimePct > 70) add('critical', 'customers',
     'Kritisch: Einmalkäufer-Rate',
@@ -653,8 +680,13 @@ export function generateRecommendations(
   const recs: MarketingRecommendation[] = []
   const bon = kpis.avg_order_value || 19.5
 
-  // 1. SMS Reaktivierung
-  const oneTimeBuyers = Math.round(kpis.total_customers * 0.7) // Schätzung
+  // ROI = Potenzial / Kosten. Ohne Kosten gibt es keinen sinnvollen Faktor (null),
+  // früher stand dort pauschal 99 und die Oberfläche zeigte „∞“.
+  const roiOf = (potential: number, cost: number): number | null =>
+    cost > 0 ? Math.round(potential / cost * 10) / 10 : null
+
+  // 1. SMS Reaktivierung – tatsächliche Zahl der Einmalkäufer statt Schätzung 70 %
+  const oneTimeBuyers = Math.round(kpis.total_customers * (100 - kpis.repeat_rate_pct) / 100)
   if (oneTimeBuyers > 0) {
     const cost = Math.round(oneTimeBuyers * 0.08)
     const potential = Math.round(oneTimeBuyers * 0.10 * bon * 3)
@@ -663,7 +695,7 @@ export function generateRecommendations(
       description: `5 EUR Gutschein per WhatsApp an ${oneTimeBuyers} Einmalkäufer. Nur Direktbestellung — nicht über Plattformen.`,
       target: `${oneTimeBuyers} Einmalkäufer`,
       estimated_cost: cost, estimated_potential: potential,
-      roi: cost > 0 ? Math.min(99, Math.round(potential / cost)) : 99,
+      roi: roiOf(potential, cost),
       priority: 1, timeframe: 'Woche 1',
     })
   }
@@ -678,11 +710,13 @@ export function generateRecommendations(
     recs.push({
       action_type: 'flyer', title: `Flyer-Offensive PLZ ${weakPLZ.postal_code}`,
       // Straßenzahl nur nennen, wenn das Verzeichnis vollständig war (sonst null)
-      description: `${weakPLZ.not_reached_residents?.toLocaleString('de-DE')} Einwohner noch nie kontaktiert.` +
+      description: (typeof weakPLZ.not_reached_residents === 'number'
+        ? `${weakPLZ.not_reached_residents.toLocaleString('de-DE')} Einwohner bisher ohne Bestellung.`
+        : 'Geringe Marktdurchdringung.') +
         (typeof weakPLZ.streets_without_orders === 'number' ? ` ${weakPLZ.streets_without_orders} Straßen ohne Bestellung.` : ''),
       target: `PLZ ${weakPLZ.postal_code} — ${weakPLZ.city}`,
       estimated_cost: fc, estimated_potential: fp,
-      roi: Math.round(fp / fc), priority: 1, timeframe: 'Woche 1–2',
+      roi: roiOf(fp, fc), priority: 1, timeframe: 'Woche 1–2',
     })
   }
 
@@ -694,7 +728,7 @@ export function generateRecommendations(
       action_type: 'b2b_visit', title: 'B2B-Akquise Firmenkunden',
       description: `Hoher Ø Bon deutet auf Gruppenbestellungen hin. Direkte Firmenansprache ohne Flyerkosten.`,
       target: topB2B, estimated_cost: 0, estimated_potential: 4800,
-      roi: 99, priority: 1, timeframe: 'Woche 2',
+      roi: null, priority: 1, timeframe: 'Woche 2',
     })
   }
 
@@ -704,7 +738,7 @@ export function generateRecommendations(
     description: 'QR-Code auf Verpackung: "Direkt bestellen = 5% Rabatt". Plattformgebühren (~30%) einsparen.',
     target: 'Alle Lieferando/Wolt-Kunden',
     estimated_cost: 0, estimated_potential: Math.round(kpis.total_revenue * 0.05),
-    roi: 99, priority: 2, timeframe: 'Sofort',
+    roi: null, priority: 2, timeframe: 'Sofort',
   })
 
   // 5. Straßen-spezifische Aktionen
@@ -716,7 +750,8 @@ export function generateRecommendations(
       target: 'Straßen ohne einzigen Kontakt',
       estimated_cost: Math.round(missedStreets.length * 45),
       estimated_potential: Math.round(missedStreets.length * 50 * 0.025 * bon * 3),
-      roi: 8, priority: 2, timeframe: 'Woche 2–3',
+      roi: roiOf(Math.round(missedStreets.length * 50 * 0.025 * bon * 3), Math.round(missedStreets.length * 45)),
+      priority: 2, timeframe: 'Woche 2–3',
     })
   }
 
@@ -727,11 +762,13 @@ export function generateRecommendations(
       description: `Nur ${kpis.vip_rate_pct}% VIP-Nutzer. Stempelkarte auf Verpackung drucken.`,
       target: 'Alle Stammkunden',
       estimated_cost: 50, estimated_potential: 2100,
-      roi: 42, priority: 3, timeframe: 'Woche 3',
+      roi: roiOf(2100, 50), priority: 3, timeframe: 'Woche 3',
     })
   }
 
-  return recs.sort((a, b) => a.priority - b.priority || b.roi - a.roi)
+  // Ohne Kosten (roi null) zuerst, sonst höherer ROI zuerst
+  const roiRank = (r: number | null) => r === null ? Number.POSITIVE_INFINITY : r
+  return recs.sort((a, b) => a.priority - b.priority || roiRank(b.roi) - roiRank(a.roi))
 }
 
 // ── App-Migration Szenarien ───────────────────────────────────────────────────

@@ -78,7 +78,15 @@ export default function DashboardPage() {
         setPlzData(plzAnalyses)
         setRecs(generateRecommendations(computed, plzAnalyses, []))
       }
-      setAlerts(dbAlerts || [])
+      // Gleiche Warnung nur einmal zeigen (neueste zuerst geladen). Ältere Uploads
+      // haben früher dieselben Warnungen erneut angelegt.
+      const seenAlert = new Set<string>()
+      setAlerts((dbAlerts || []).filter(a => {
+        const key = `${a.category}|${a.title}`
+        if (seenAlert.has(key)) return false
+        seenAlert.add(key)
+        return true
+      }))
       setLoading(false)
     }
     load()
@@ -159,8 +167,9 @@ export default function DashboardPage() {
             return (
               <div key={i} style={{ background:'#1a2233', border:'1px solid #2a3d5a', borderRadius:'10px', padding:'14px', marginBottom:'10px', display:'flex', gap:'14px' }}>
                 <div style={{ width:'50px', minWidth:'50px', height:'50px', borderRadius:'10px', background:col+'22', border:`1px solid ${col}44`, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center' }}>
-                  <div style={{ fontSize:'13px', fontWeight:700, fontFamily:'monospace', color:col }}>{r.roi>=99?'∞':r.roi+'x'}</div>
-                  <div style={{ fontSize:'9px', color:'#8a9bb5' }}>ROI</div>
+                  {/* ROI: ohne Kosten gibt es keinen Faktor – dann „0 €“ Kosten statt „∞“ */}
+                  <div style={{ fontSize:'13px', fontWeight:700, fontFamily:'monospace', color:col }}>{r.roi === null ? '0 €' : r.roi.toLocaleString('de-DE') + 'x'}</div>
+                  <div style={{ fontSize:'9px', color:'#8a9bb5' }}>{r.roi === null ? 'Kosten' : 'ROI'}</div>
                 </div>
                 <div style={{ flex:1 }}>
                   <div style={{ fontSize:'13px', fontWeight:600, color:'#fff', marginBottom:'4px' }}>{r.title}</div>
