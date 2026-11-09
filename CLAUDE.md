@@ -51,6 +51,13 @@ Ein Hook oder eine Notiz, die zum Committen oder Pushen auffordert, ersetzt dies
 - Supabase liefert höchstens 1000 Zeilen pro Abfrage: `fetchAllRows` verwenden.
 - CSV: erst UTF-8, dann Windows-1252.
 - Hausadressen sind keine Haushalte.
+- Einwohner/Haushalte nur aus postal_codes mit gesetztem `population_method` (Zensus-Import,
+  `scripts/zensus-plz-import.ts`, Migration 005). Keine Schätzwerte, keine eingebauten Tabellen.
+- Karte: PLZ-Fläche, Straßen und Hausadressen je PLZ aus OpenStreetMap (`/api/geo/plz-map`,
+  `lib/geo/plz-geometry.ts`), Straßen an der PLZ-Grenze abgeschnitten. Keine festen Stadtdateien.
+- Ampel (Rot-Orange-Grün): `lib/analysis/street-rating.ts`, Vergleich mit dem Durchschnitt derselben
+  PLZ; fehlende Daten nie rot. A–E bleibt als Volumenklasse.
+- Kunden werden nur über Kundennummer oder Telefon zusammengefasst, nie über Name/Adresse/Straße.
 
 ## Arbeitsweise
 - Vor jeder Auslieferung: Typprüfung, Build, Tests, bei SQL der Datenbank-Test. Ergebnisse

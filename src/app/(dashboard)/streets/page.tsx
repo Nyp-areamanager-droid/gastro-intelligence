@@ -2,6 +2,8 @@
 import { useEffect, useState } from 'react'
 import dynamic from 'next/dynamic'
 import { createClient } from '@/lib/supabase/client'
+import { RATING_COLORS, RATING_LABELS, type Rating } from '@/lib/analysis/street-rating'
+import { streetNameKey } from '@/lib/geo/street-name'
 
 // Leaflet nur client-seitig laden (kein SSR)
 const AnalysisMap = dynamic(
@@ -15,11 +17,10 @@ interface StreetRow {
   orders: number
   revenue: number
   streetClass: string
+  rating: Rating
+  ratingReason: string
 }
 
-// PLZ, für die die eingebaute Straßenkarte (public/data/koeln_streets.geojson)
-// Straßenlinien enthält. Derzeit nur Köln; andere Orte haben noch keine Karte.
-const MAP_STREET_PLZ = new Set<string>(["50668", "50670", "50674", "50676", "50678", "50679", "50733", "50735", "50737", "50739", "50769", "50823", "50825", "50827", "50829", "50858", "50859", "50931", "50933", "50935", "51061", "51063", "51065", "51069", "51107", "51109", "51143", "51147"])
 
 export default function StreetsPage() {
   const [plzList, setPlzList] = useState<string[]>([])
@@ -33,6 +34,8 @@ export default function StreetsPage() {
   // Status des Straßenverzeichnisses: ohne vollständige Liste keine Aussage
   // über Straßen ohne Bestellungen
   const [directory, setDirectory] = useState<{ complete: boolean; message: string | null } | null>(null)
+  const [ratingSummary, setRatingSummary] = useState('')
+  const [openRow, setOpenRow] = useState<string | null>(null)
 
   useEffect(() => {
     async function loadPLZ() {
@@ -60,15 +63,27 @@ export default function StreetsPage() {
     setLoading(true)
     setStreets([])
     setDirectory(null)
-    const res = await fetch(`/api/analysis/plz?plz=${plz}`)
+    setRatingSummary('')
+    const [res, ratingRes] = await Promise.all([
+      fetch(`/api/analysis/plz?plz=${plz}`),
+      fetch(`/api/analysis/streets?plz=${plz}`).catch(() => null),
+    ])
     if (!res.ok) { setLoading(false); return }
     const data = await res.json()
+    // Ampel je Straße (Vergleich mit dem PLZ-Durchschnitt)
+    const ratingData = ratingRes && ratingRes.ok ? await ratingRes.json().catch(() => null) : null
+    const ratingByKey = new Map<string, { rating: Rating; reason: string }>()
+    for (const r of (ratingData?.streets || [])) ratingByKey.set(streetNameKey(r.street_name), { rating: r.rating, reason: r.rating_reason })
+    setRatingSummary(ratingData?.rating?.summary || '')
+    const ratingOf = (name: string) => ratingByKey.get(streetNameKey(name)) || { rating: 'none' as Rating, reason: 'Nicht bewertbar: keine Daten.' }
     const withOrders: StreetRow[] = (data.streets?.with_orders || []).map((s: any) => ({
       name: s.street_name, customers: s.customer_count, orders: s.order_count,
-      revenue: s.revenue, streetClass: s.street_class || 'D',
+      revenue: s.revenue, streetClass: s.street_class || '—',
+      rating: ratingOf(s.street_name).rating, ratingReason: ratingOf(s.street_name).reason,
     }))
     const withoutOrders: StreetRow[] = (data.streets?.without_orders || []).map((s: any) => ({
       name: s.street_name, customers: 0, orders: 0, revenue: 0, streetClass: 'E',
+      rating: ratingOf(s.street_name).rating, ratingReason: ratingOf(s.street_name).reason,
     }))
     setStreets([...withOrders, ...withoutOrders])
     setDirectory(data.streets?.directory || null)
@@ -90,8 +105,9 @@ export default function StreetsPage() {
   const withOrders = streets.filter(s => s.orders > 0).length
   const mktPct = info?.population && info.customer_count ? (info.customer_count / info.population * 100) : null
 
-  const classColors: Record<string,string> = { A:'#00d084', B:'#33e8a0', C:'#f5a623', D:'#2e86c1', E:'#e63027' }
-  const classLabels: Record<string,string> = { A:'Sehr aktiv', B:'Aktiv', C:'Mittel', D:'Schwach', E:'Kein Kontakt' }
+  // A–E beschreibt das Volumen (absolute Anzahl), die Ampel den Vergleich
+  // mit dem Durchschnitt derselben PLZ
+  const classLabels: Record<string,string> = { A:'A · sehr viel', B:'B · viel', C:'C · mittel', D:'D · wenig', E:'E · sehr wenig/keine' }
 
   return (
     <div style={{ padding:'28px 32px', maxWidth:'1300px', margin:'0 auto' }}>
@@ -140,17 +156,9 @@ export default function StreetsPage() {
         </div>
       )}
 
-      {selectedPLZ && !MAP_STREET_PLZ.has(selectedPLZ) && (
-        <div role="status" style={{ background:'rgba(138,155,181,0.08)', border:'1px solid #1f2d45', borderRadius:'10px', padding:'12px 16px', marginBottom:'12px', fontSize:'13px', color:'#8a9bb5' }}>
-          Für PLZ {selectedPLZ} liegt noch keine Straßenkarte vor. Die Karte zeigt deshalb keine Straßenfarben. Die Tabelle unten ist davon nicht betroffen.
-        </div>
-      )}
-
       {/* Interaktive Straßenkarte */}
       <div style={{ background:'#111827', border:'1px solid #1f2d45', borderRadius:'12px', padding:'4px', marginBottom:'24px', height:'420px' }}>
         <AnalysisMap
-          center={[50.958, 6.973]}
-          zoom={12}
           plz={selectedPLZ || undefined}
           showStreets={false}
           showCompetitors={false}
@@ -198,18 +206,22 @@ export default function StreetsPage() {
         ) : (
           <>
             {/* Legende */}
-            <div style={{ display:'flex', gap:'16px', marginBottom:'12px', flexWrap:'wrap' }}>
-              {Object.entries(classColors).map(([cls, col]) => (
-                <div key={cls} style={{ display:'flex', alignItems:'center', gap:'6px', fontSize:'11px', color:'#8a9bb5' }}>
-                  <div style={{ width:'8px', height:'8px', borderRadius:'50%', background:col }} />
-                  <span style={{ color:col, fontWeight:600 }}>Klasse {cls}</span> — {classLabels[cls]}
+            <div style={{ display:'flex', gap:'16px', marginBottom:'8px', flexWrap:'wrap' }}>
+              {(['green','orange','red','none'] as Rating[]).map(r => (
+                <div key={r} style={{ display:'flex', alignItems:'center', gap:'6px', fontSize:'11px', color:'#8a9bb5' }}>
+                  <div style={{ width:'8px', height:'8px', borderRadius:'50%', background:RATING_COLORS[r] }} />
+                  <span style={{ color:RATING_COLORS[r], fontWeight:600 }}>{RATING_LABELS[r]}</span>
                 </div>
               ))}
             </div>
+            <p style={{ fontSize:'11px', color:'#4a5a70', margin:'0 0 12px' }}>
+              {ratingSummary || 'Ampel: Vergleich jeder Straße mit dem Durchschnitt dieser PLZ.'} Grün = mindestens Durchschnitt, Orange = halber bis knapp Durchschnitt, Rot = unter dem halben Durchschnitt.
+              Fehlende Daten werden nie rot, sondern als „nicht bewertbar“ gezeigt. Die Klasse A–E zeigt das Volumen. Ein Klick auf eine Straße zeigt die Rechnung.
+            </p>
 
             {/* Tabelle Header */}
             <div style={{ display:'grid', gridTemplateColumns:'10px 1fr 70px 80px 80px 110px', gap:'12px', padding:'6px 8px', borderBottom:'1px solid #1f2d45', marginBottom:'4px' }}>
-              {['','Straße','Kunden','Bestellungen','Umsatz','Status'].map((h,i) => (
+              {['','Straße','Kunden','Bestellungen','Umsatz','Ampel · Volumen'].map((h,i) => (
                 <div key={i} style={{ fontSize:'10px', color:'#4a5a70', textTransform:'uppercase', letterSpacing:'0.5px', textAlign: i>1?'right':'left' }}>{h}</div>
               ))}
             </div>
@@ -219,9 +231,10 @@ export default function StreetsPage() {
               {filtered.length === 0 ? (
                 <div style={{ textAlign:'center', padding:'32px', color:'#4a5a70' }}>Keine Straßen gefunden</div>
               ) : filtered.slice(0,500).map((s,i) => {
-                const col = classColors[s.streetClass] || '#4a5a70'
+                const col = RATING_COLORS[s.rating]
                 return (
-                  <div key={i} style={{ display:'grid', gridTemplateColumns:'10px 1fr 70px 80px 80px 110px', gap:'12px', padding:'8px', borderRadius:'6px', marginBottom:'2px', alignItems:'center' }}
+                  <div key={i}>
+                  <div onClick={() => setOpenRow(openRow === s.name ? null : s.name)} style={{ cursor:'pointer', display:'grid', gridTemplateColumns:'10px 1fr 70px 80px 80px 110px', gap:'12px', padding:'8px', borderRadius:'6px', marginBottom:'2px', alignItems:'center' }}
                     onMouseEnter={e => (e.currentTarget.style.background='rgba(26,34,51,0.7)')}
                     onMouseLeave={e => (e.currentTarget.style.background='transparent')}>
                     <div style={{ width:'8px', height:'8px', borderRadius:'50%', background:col }} />
@@ -229,9 +242,13 @@ export default function StreetsPage() {
                     <div style={{ fontSize:'12px', fontFamily:'monospace', textAlign:'right', color:'#8a9bb5' }}>{s.customers||'—'}</div>
                     <div style={{ fontSize:'12px', fontFamily:'monospace', textAlign:'right', color: s.orders>0?'#00d084':'#4a5a70', fontWeight: s.orders>9?700:400 }}>{s.orders}</div>
                     <div style={{ fontSize:'12px', fontFamily:'monospace', textAlign:'right', color: s.revenue>0?'#f5a623':'#4a5a70' }}>{s.revenue>0?s.revenue.toFixed(0)+' €':'—'}</div>
-                    <div style={{ fontSize:'11px', fontWeight:600, color:col, padding:'3px 8px', background:col+'18', borderRadius:'20px', border:`1px solid ${col}44`, textAlign:'center' }}>
-                      {classLabels[s.streetClass] || s.streetClass}
+                    <div title={s.ratingReason} style={{ fontSize:'11px', fontWeight:600, color:col, padding:'3px 8px', background:col+'18', borderRadius:'20px', border:`1px solid ${col}44`, textAlign:'center', cursor:'help' }}>
+                      {RATING_LABELS[s.rating]}<span style={{ color:'#8a9bb5', fontWeight:400 }}> · {classLabels[s.streetClass] ? s.streetClass : '—'}</span>
                     </div>
+                  </div>
+                  {openRow === s.name && (
+                    <div style={{ fontSize:'11px', color:'#c8d3e6', padding:'4px 8px 10px 30px' }}>{s.ratingReason}</div>
+                  )}
                   </div>
                 )
               })}
@@ -241,7 +258,7 @@ export default function StreetsPage() {
             </div>
 
             <p style={{ fontSize:'11px', color:'#4a5a70', marginTop:'16px', fontStyle:'italic' }}>
-              Quelle: OpenPLZ API (amtliches Straßenverzeichnis) · Einwohner: Zensus 2022
+              Quellen: Straßenverzeichnis OpenPLZ API · Karte, PLZ-Flächen und Hausadressen © OpenStreetMap-Mitwirkende (ODbL) · Einwohner nur mit belegter Zensus-Quelle, sonst „—“
             </p>
           </>
         )}

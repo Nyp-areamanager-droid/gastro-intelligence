@@ -400,6 +400,8 @@ export interface ColumnMapping {
 }
 
 export interface ParsedCustomerRow {
+  /** Kundennummer aus der Datei – eindeutige Wiedererkennung */
+  customer_ref?: string
   phone_raw?: string
   phone_normalized?: string
   first_name?: string
@@ -487,6 +489,8 @@ export interface DashboardKPIs {
   top_plz: string
   top_street: string
   critical_alerts: number
+  /** Datensätze ohne Kundennummer und ohne Telefon (nicht eindeutig zuordenbar) */
+  unidentified_records?: number
 }
 
 export interface TrendData {

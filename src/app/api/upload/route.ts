@@ -9,7 +9,8 @@ import {
 } from '@/lib/analysis/engine'
 import { streetNameKey } from '@/lib/geo/street-name'
 import { readWorkbook } from '@/lib/import/read-table'
-import { DataProviderOrchestrator, censusProvider } from '@/lib/providers'
+import { DataProviderOrchestrator } from '@/lib/providers'
+import { verifiedPopulation } from '@/lib/geo/population'
 import { fetchAllRows } from '@/lib/supabase/fetch-all'
 import {
   parseImportMode, parsePeriodDate, fileFingerprint, decideImport, overlapShare,
@@ -132,7 +133,7 @@ export async function POST(req: NextRequest) {
     if (decision.action === 'append') {
       const { data: existingRows, error: rowsError } = await fetchAllRows((from, to) =>
         supabase.from('customers')
-          .select('postal_code, street_normalized, house_number, phone_normalized, total_orders, total_revenue', { count: 'exact' })
+          .select('postal_code, street_normalized, house_number, phone_normalized, customer_ref, total_orders, total_revenue', { count: 'exact' })
           .eq('company_id', companyId).order('id').range(from, to))
       if (rowsError) {
         return NextResponse.json({ error: 'Bisherige Daten konnten nicht geprüft werden. Bitte versuchen Sie es erneut.' }, { status: 500 })
@@ -194,6 +195,7 @@ export async function POST(req: NextRequest) {
         company_id: companyId,
         store_id: storeId || null,
         upload_id: upload.id,
+        customer_ref: r.customer_ref || null,
         phone_normalized: r.phone_normalized || null,
         phone_raw: r.phone_raw || null,
         first_name: r.first_name || null,
@@ -306,33 +308,14 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // Einwohner/Haushalte: gespeicherte Werte, sonst hinterlegte Tabelle.
-      // Keine Schätzwerte: Unbekannt bleibt unbekannt (null).
+      // Einwohner/Haushalte nur aus belegter Quelle (Zensus-Import mit
+      // population_method). Unbekannt bleibt null und wird als „—“ gezeigt.
       const { data: plzData } = await supabase
         .from('postal_codes')
-        .select('population, households')
+        .select('population, households, population_method, population_reference_date')
         .eq('postal_code', plz)
         .maybeSingle()
-      const censusData = censusProvider.getCensusData(plz)
-      const population = plzData?.population || censusData?.population || null
-      const households = plzData?.households || censusData?.households || null
-
-      if (!plzData?.population && censusData?.population) {
-        try {
-          await reference.from('postal_codes').upsert({
-            postal_code: plz,
-            city: plzRows[0]?.city || plz,
-            population: censusData.population,
-            households: censusData.households,
-            population_year: censusData.year,
-            data_source: 'census',
-            trust_level: 'official',
-            last_fetched_at: new Date().toISOString(),
-          }, { onConflict: 'postal_code' })
-        } catch {
-          // Nicht-kritisch: Bevölkerungsdaten konnten nicht gecacht werden
-        }
-      }
+      const { population, households } = verifiedPopulation(plzData)
 
       const analysis = analyzePLZ(plzRows, directory, population, households)
       if (!streetDir.complete && streetDir.error) analysis.warnings.push(`⚠️ ${streetDir.error}`)
@@ -485,6 +468,7 @@ export async function POST(req: NextRequest) {
 function customerRecordToRow(c: any): ParsedCustomerRow {
   return {
     _row_index: 0, _errors: [],
+    customer_ref: c.customer_ref || undefined,
     phone_normalized: c.phone_normalized || undefined, phone_raw: c.phone_raw || undefined,
     first_name: c.first_name || undefined, last_name: c.last_name || undefined, full_name: c.full_name || undefined,
     street: c.street || undefined, street_normalized: c.street_normalized || undefined, house_number: c.house_number || undefined,

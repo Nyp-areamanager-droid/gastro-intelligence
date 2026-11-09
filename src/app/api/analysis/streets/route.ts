@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createServerSupabaseClient } from '@/lib/supabase/server'
 import { fetchAllRows } from '@/lib/supabase/fetch-all'
+import { rateStreets } from '@/lib/analysis/street-rating'
+import { loadPlzMap } from '@/lib/geo/overpass'
+import { streetNameKey } from '@/lib/geo/street-name'
 
 /**
  * GET /api/analysis/streets?plz=50670
@@ -12,7 +15,9 @@ import { fetchAllRows } from '@/lib/supabase/fetch-all'
  *   street_name, customer_count, order_count, revenue,
  *   avg_order_value, orders_per_customer, street_class, is_in_official_list
  *
- * Keine neuen Berechnungen – nur Lesezugriff auf bestehende Daten.
+ * Zusätzlich je Straße die Ampel (rating, index, expected, reason) aus
+ * lib/analysis/street-rating.ts: Vergleich mit den anderen Straßen derselben
+ * PLZ, wo möglich je Hausadresse (OpenStreetMap).
  */
 export async function GET(req: NextRequest) {
   const supabase = createServerSupabaseClient()
@@ -20,7 +25,7 @@ export async function GET(req: NextRequest) {
   if (!user) return NextResponse.json({ error: 'Nicht authentifiziert' }, { status: 401 })
 
   const plz = req.nextUrl.searchParams.get('plz')
-  if (!plz) return NextResponse.json({ error: 'PLZ fehlt' }, { status: 400 })
+  if (!plz || !/^\d{5}$/.test(plz)) return NextResponse.json({ error: 'PLZ fehlt oder ist ungültig' }, { status: 400 })
 
   // Company ID des Users
   const { data: membership } = await supabase
@@ -37,7 +42,7 @@ export async function GET(req: NextRequest) {
   // (mehrere Uploads möglich → neuesten analytics-Eintrag nehmen)
   const { data: analytics } = await supabase
     .from('analytics')
-    .select('id')
+    .select('id, streets_total')
     .eq('company_id', companyId)
     .eq('postal_code', plz)
     .order('created_at', { ascending: false })
@@ -68,9 +73,30 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
 
+  // Hausadressen je Straße als Vergleichsgröße (wenn der Kartendienst sie liefert)
+  const geo = await loadPlzMap(plz)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const list = (streets || []) as any[]
+  const result = rateStreets({
+    streets: list.map(s => ({ street_name: s.street_name, order_count: s.order_count, street_class: s.street_class })),
+    // Ohne vollständiges Verzeichnis (streets_total = null) kein Vergleich
+    directoryComplete: analytics.streets_total !== null && analytics.streets_total !== undefined,
+    addressCounts: geo.ok ? geo.map.address_counts : null,
+  })
+
   return NextResponse.json({
     plz,
     analytics_id: analytics.id,
-    streets: streets || [],
+    rating: {
+      basis: result.basis,
+      plz_average: result.plz_average,
+      total_orders: result.total_orders,
+      summary: result.summary,
+      addresses_source: geo.ok ? geo.map.source : null,
+    },
+    streets: list.map(s => {
+      const r = result.ratings.get(streetNameKey(s.street_name))
+      return { ...s, rating: r?.rating ?? 'none', rating_index: r?.index ?? null, rating_expected: r?.expected ?? null, rating_reason: r?.reason ?? 'Nicht bewertbar: keine Daten.' }
+    }),
   })
 }

@@ -233,6 +233,7 @@ export type Database = {
           store_id: string | null
           upload_id: string | null
           phone_normalized: string | null
+          customer_ref: string | null
           phone_raw: string | null
           first_name: string | null
           last_name: string | null
@@ -271,6 +272,7 @@ export type Database = {
           store_id?: string | null
           upload_id?: string | null
           phone_normalized?: string | null
+          customer_ref?: string | null
           phone_raw?: string | null
           first_name?: string | null
           last_name?: string | null
@@ -309,6 +311,7 @@ export type Database = {
           store_id?: string | null
           upload_id?: string | null
           phone_normalized?: string | null
+          customer_ref?: string | null
           phone_raw?: string | null
           first_name?: string | null
           last_name?: string | null
@@ -368,6 +371,8 @@ export type Database = {
           trust_level: Database['public']['Enums']['data_trust_level']
           population_source: Database['public']['Enums']['data_source'] | null
           population_year: number | null
+          population_method: string | null
+          population_reference_date: string | null
           last_fetched_at: string | null
           needs_refresh: boolean
           created_at: string
@@ -395,6 +400,8 @@ export type Database = {
           trust_level?: Database['public']['Enums']['data_trust_level']
           population_source?: Database['public']['Enums']['data_source'] | null
           population_year?: number | null
+          population_method?: string | null
+          population_reference_date?: string | null
           last_fetched_at?: string | null
           needs_refresh?: boolean
           created_at?: string
@@ -422,6 +429,8 @@ export type Database = {
           trust_level?: Database['public']['Enums']['data_trust_level']
           population_source?: Database['public']['Enums']['data_source'] | null
           population_year?: number | null
+          population_method?: string | null
+          population_reference_date?: string | null
           last_fetched_at?: string | null
           needs_refresh?: boolean
           created_at?: string

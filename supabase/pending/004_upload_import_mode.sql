@@ -6,6 +6,8 @@
 --   - Upload-Status „replaced“ für Uploads, deren Daten ersetzt wurden
 --   - uploads.file_hash: Prüfsumme der Datei, um dieselbe Datei zu erkennen
 --   - uploads.import_mode: first | replace | append
+--   - customers.customer_ref: Kundennummer aus der Datei, einzige Kennung
+--     neben der Telefonnummer, über die derselbe Kunde wiedererkannt wird
 -- Die bestehenden Regeln für uploads (Lesen für Mitglieder, Schreiben für
 -- owner/admin/manager) gelten unverändert auch für die neuen Spalten.
 --
@@ -29,5 +31,8 @@ BEGIN
 END $$;
 
 CREATE INDEX IF NOT EXISTS uploads_company_file_hash_idx ON public.uploads (company_id, file_hash);
+
+ALTER TABLE public.customers ADD COLUMN IF NOT EXISTS customer_ref TEXT;
+CREATE INDEX IF NOT EXISTS customers_company_ref_idx ON public.customers (company_id, customer_ref) WHERE customer_ref IS NOT NULL;
 
 COMMIT;

@@ -279,7 +279,9 @@ describe('POST /api/sync-population – nur eigene Firma', () => {
     state.authClient = makeAuthClient({ id: 'u1' }, [{ company_id: 'A', role: 'manager' }], null, (call) =>
       call.table === 'analytics' && call.ops.some(([op]) => op === 'select')
         ? { data: [{ id: 'an1', postal_code: '50733', population: null, customer_count: 20, order_count: 65 }], error: null }
-        : { data: null, error: null })
+        : call.table === 'postal_codes'
+          ? { data: [{ postal_code: '50733', population: 24000, households: 13000, population_method: 'zensus2022_gitter100m_plz_osm' }], error: null }
+          : { data: null, error: null })
     state.serviceClient = makeQueryClient(() => ({ data: null, error: null }))
     const { POST } = await import('@/app/api/sync-population/route')
     const res = await POST()
@@ -289,6 +291,24 @@ describe('POST /api/sync-population – nur eigene Firma', () => {
     const analyticsCalls = state.authClient!.calls.filter(c => c.table === 'analytics')
     expect(analyticsCalls.length).toBe(2) // ein select, ein update
     for (const c of analyticsCalls) expect(c.ops).toContainEqual(['eq', ['company_id', 'A']])
+    const update = analyticsCalls.find(c => c.ops.some(([op]) => op === 'update'))!
+    expect(update.ops.find(([op]) => op === 'update')![1][0]).toEqual({ population: 24000, market_penetration_pct: 0.08, not_reached_residents: 23980 })
+    // Referenzdaten werden von dieser Route nicht mehr geschrieben
+    expect(state.serviceClient!.calls).toHaveLength(0)
+  })
+
+  it('unbelegte Einwohnerzahl (alte Tabelle, ohne Methode) wird entfernt, nicht übernommen', async () => {
+    state.authClient = makeAuthClient({ id: 'u1' }, [{ company_id: 'A', role: 'manager' }], null, (call) =>
+      call.table === 'analytics' && call.ops.some(([op]) => op === 'select')
+        ? { data: [{ id: 'an1', postal_code: '50733', population: 24800, customer_count: 20, order_count: 65 }], error: null }
+        : call.table === 'postal_codes'
+          ? { data: [{ postal_code: '50733', population: 24800, households: 14200, population_method: null }], error: null }
+          : { data: null, error: null })
+    const { POST } = await import('@/app/api/sync-population/route')
+    const res = await POST()
+    expect(res.status).toBe(200)
+    const update = state.authClient!.calls.find(c => c.table === 'analytics' && c.ops.some(([op]) => op === 'update'))!
+    expect(update.ops.find(([op]) => op === 'update')![1][0]).toEqual({ population: null, market_penetration_pct: null, not_reached_residents: null })
   })
 })
 
@@ -462,12 +482,14 @@ describe('Provider-Routen – gemeinsame Referenzdaten', () => {
     expect('households' in row).toBe(false)
   })
 
-  it('OpenPLZ mit Zensuswert: Einwohnerzahl wird gespeichert', async () => {
+  it('OpenPLZ-Abruf schreibt nie Einwohnerzahlen (die kommen nur aus dem Zensus-Import)', async () => {
     providerState.census = { population: 24800, households: 14200, year: 2022 }
     const { GET } = await import('@/app/api/providers/openplz/route')
     await GET(new NextRequest('http://localhost/api/providers/openplz?plz=50733'))
     const upsert = state.serviceClient!.calls.find(c => c.table === 'postal_codes')!
     const row = upsert.ops.find(([op]) => op === 'upsert')![1][0] as Record<string, unknown>
-    expect(row.population).toBe(24800)
+    expect('population' in row).toBe(false)
+    expect('households' in row).toBe(false)
+    expect('population_source' in row).toBe(false)
   })
 })

@@ -97,9 +97,12 @@ export function detectColumns(headers: string[]): Record<string, string> {
     ['is_vip',        ['vip','premium','loyal','stammkunde']],
     // Aggregierte CSV: Anzahl eindeutiger Kunden je Straße/PLZ
     ['customer_count',['kunden','kundenanzahl','unique kunden','unique customers','anzahl kunden','eindeutige kunden']],
-    // Spalten, die bewusst KEINEM Feld zugeordnet werden (sonst würde z. B.
-    // „Kundennummer“ als Kundenanzahl gelesen)
-    ['_ignore',       ['kundennummer','kunden-nr','kundennr','customer id','bestellnummer','order id','bestell-nr']],
+    // Eindeutige Kennungen aus dem Kassensystem. Die Kundennummer ist die
+    // einzige Angabe neben der Telefonnummer, über die derselbe Kunde in
+    // mehreren Dateien wiedererkannt wird. Die Bestellnummer unterscheidet nur
+    // echte doppelte Zeilen von zwei gleichen Bestellungen.
+    ['customer_ref',  ['kundennummer','kunden-nr','kundennr','kunden-id','kundenid','customer id','customer_id','customer number']],
+    ['order_ref',     ['bestellnummer','bestell-nr','bestellnr','order id','order_id','order number','auftragsnummer']],
   ]
 
   // Jede Spalte bekommt das Feld mit dem GENAUESTEN (längsten) passenden
@@ -124,7 +127,6 @@ export function detectColumns(headers: string[]): Record<string, string> {
     const free = c.matches.find(m => !map[m.field])
     if (free) map[free.field] = c.h
   }
-  delete map['_ignore']
   return map
 }
 
@@ -163,6 +165,9 @@ export function parseAndCleanRows(
       parsed.phone_raw = phoneRaw
       parsed.phone_normalized = normalizePhone(phoneRaw)
     }
+
+    // Kundennummer aus dem Kassensystem (nur zur Wiedererkennung)
+    parsed.customer_ref = get('customer_ref') || undefined
 
     // Name
     parsed.first_name = get('first_name') || undefined
@@ -241,12 +246,15 @@ export function parseAndCleanRows(
       parsed._aggregated_customer_count = Math.round(customerCountRaw)
     }
 
-    // Duplikat-Check: nur für Einzelkunden (phone + normalized_street + plz).
-    // Aggregierte Zeilen werden nie als Duplikate gewertet — sie kommen aus
-    // einem bereits deduplizierten Export und werden in analyzeStreets summiert.
+    // Duplikat-Check: Nur Zeilen, die in ALLEN gelesenen Spalten gleich sind,
+    // gelten als doppelte Zeile. Früher reichte dieselbe Telefonnummer mit
+    // derselben Straße – dann gingen bei Exporten mit einer Zeile je Bestellung
+    // echte Bestellungen samt Umsatz verloren. Zeilen derselben Person mit
+    // unterschiedlichen Werten bleiben erhalten; gezählt wird die Person
+    // später einmal (über Kundennummer oder Telefon).
     if (!parsed._is_aggregated) {
-      const dupKey = `${parsed.phone_normalized || ''}|${parsed.street_normalized || ''}|${parsed.postal_code}`
-      if (seen.has(dupKey) && parsed.phone_normalized) {
+      const dupKey = Object.keys(columnMapping).sort().map(f => get(f)).join('\u0001')
+      if (seen.has(dupKey)) {
         duplicates++
         continue
       }
@@ -568,6 +576,9 @@ function getStreetRecommendation(customers: number, orders: number): string {
 
 export function computeDashboardKPIs(rows: ParsedCustomerRow[]): DashboardKPIs {
   const total = rows.length
+  // Datensätze ohne Kundennummer und ohne Telefon: Sie zählen je als ein
+  // Kunde, können aber dieselbe Person mehrfach enthalten
+  const unidentified = rows.filter(r => !r._is_aggregated && !r.customer_ref && !r.phone_normalized).length
   const totalOrders = rows.reduce((s, r) => s + r.total_orders, 0)
   const totalRevenue = rows.reduce((s, r) => s + r.total_revenue, 0)
   const repeatCustomers = rows.filter(r => r.total_orders >= 2).length
@@ -596,6 +607,7 @@ export function computeDashboardKPIs(rows: ParsedCustomerRow[]): DashboardKPIs {
     top_plz: topPLZ,
     top_street: topStreet,
     critical_alerts: 0, // Wird separat berechnet
+    unidentified_records: unidentified,
   }
 }
 

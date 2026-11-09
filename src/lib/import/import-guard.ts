@@ -27,9 +27,11 @@ export function fileFingerprint(buffer: ArrayBuffer): string {
 /** Ein Datensatz in einer Form, die Datei-unabhängig vergleichbar ist. */
 export function rowFingerprint(r: {
   postal_code?: string | null; street_normalized?: string | null; house_number?: string | null
-  phone_normalized?: string | null; total_orders?: number | null; total_revenue?: number | null
+  phone_normalized?: string | null; customer_ref?: string | null
+  total_orders?: number | null; total_revenue?: number | null
 }): string {
   return [
+    (r.customer_ref || '').trim().toLowerCase(),
     r.postal_code || '', (r.street_normalized || '').toLowerCase(), (r.house_number || '').toLowerCase(),
     r.phone_normalized || '', Number(r.total_orders ?? 0), Number(r.total_revenue ?? 0).toFixed(2),
   ].join('|')

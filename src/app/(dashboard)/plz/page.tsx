@@ -1,7 +1,7 @@
 'use client'
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
-import { getPopulation } from '@/lib/census'
+import { verifiedPopulation, POPULATION_SOURCE_TEXT, MISSING_POPULATION_TEXT } from '@/lib/geo/population'
 
 export default function PlzPage() {
   const [data, setData] = useState<any[]>([])
@@ -22,12 +22,19 @@ export default function PlzPage() {
       for (const r of (rows || [])) {
         if (!seen.has(r.postal_code)) seen.set(r.postal_code, r)
       }
+      // Einwohner und Haushalte nur aus belegter Quelle (Zensus-Import)
+      const plzList = Array.from(seen.keys())
+      const { data: refs } = plzList.length
+        ? await supabase.from('postal_codes').select('postal_code, population, households, population_method, population_reference_date').in('postal_code', plzList)
+        : { data: [] as any[] }
+      const refByPlz = new Map((refs || []).map((x: any) => [x.postal_code, verifiedPopulation(x)]))
       const deduped = Array.from(seen.values()).map(r => {
-        const pop = r.population || getPopulation(r.postal_code)
+        const v = refByPlz.get(r.postal_code)
+        const pop = v?.population ?? null
         const customers = r.customer_count || 0
-        const penetration = pop && customers ? Math.round(customers / pop * 10000) / 100 : null
-        const notReached = pop && customers ? pop - customers : null
-        return { ...r, _pop: pop, _penetration: penetration, _notReached: notReached }
+        const penetration = pop ? Math.round(customers / pop * 10000) / 100 : null
+        const notReached = pop ? Math.max(0, pop - customers) : null
+        return { ...r, _pop: pop, _households: v?.households ?? null, _penetration: penetration, _notReached: notReached }
       })
       setData(deduped)
       setLoading(false)
@@ -47,9 +54,11 @@ export default function PlzPage() {
     </div>
   )
 
-  const totalPop = data.reduce((s,r) => s + (r._pop || 0), 0)
+  const withPop = data.filter(r => r._pop)
+  const totalPop = withPop.reduce((s,r) => s + (r._pop || 0), 0)
   const totalCustomers = data.reduce((s,r) => s + (r.customer_count || 0), 0)
-  const totalNotReached = data.reduce((s,r) => s + (r._notReached || 0), 0)
+  // Nur PLZ mit belegter Einwohnerzahl, sonst würden Kunden ohne Gegenstück gezählt
+  const totalNotReached = withPop.reduce((s,r) => s + (r._notReached || 0), 0)
   const avgPct = data.filter(r => r._penetration).length
     ? data.filter(r => r._penetration).reduce((s,r) => s + r._penetration, 0) / data.filter(r => r._penetration).length
     : null
@@ -68,8 +77,8 @@ export default function PlzPage() {
           {[
             { label:'📍 PLZ-Gebiete', value: data.length, color:'#2e86c1' },
             { label:'👥 Kunden', value: totalCustomers.toLocaleString('de-DE'), color:'#00d084' },
-            { label:'🏘️ Einwohner', value: totalPop > 0 ? totalPop.toLocaleString('de-DE') : '—', color:'#f5a623' },
-            { label:'📊 Ø Marktanteil', value: avgPct ? avgPct.toFixed(2)+'%' : '—', color: avgPct && avgPct>2 ? '#00d084':'#e63027' },
+            { label:`🏘️ Einwohner (${withPop.length} von ${data.length} PLZ belegt)`, value: totalPop > 0 ? totalPop.toLocaleString('de-DE') : '—', color:'#f5a623' },
+            { label:'📊 Ø Marktanteil', value: avgPct ? avgPct.toFixed(2)+'%' : '—', color:'#2e86c1' },
             { label:'🔴 Nicht erreicht', value: totalNotReached > 0 ? totalNotReached.toLocaleString('de-DE') : '—', color:'#f87171' },
           ].map((k,i) => (
             <div key={i} style={{ background:'#111827', border:'1px solid #1f2d45', borderTop:`3px solid ${k.color}`, borderRadius:'12px', padding:'20px' }}>
@@ -92,6 +101,7 @@ export default function PlzPage() {
                 <th style={th}>Bestellungen</th>
                 <th style={th}>Umsatz</th>
                 <th style={th}>Einwohner</th>
+                <th style={th}>Haushalte</th>
                 <th style={th}>Bestellen bei uns %</th>
                 <th style={th}>Nicht erreicht</th>
                 <th style={th}>Straßen</th>
@@ -100,7 +110,8 @@ export default function PlzPage() {
             <tbody>
               {data.map((r,i) => {
                 const pct = r._penetration
-                const pctColor = pct === null ? '#4a5a70' : pct < 1 ? '#f87171' : pct < 3 ? '#fbbf24' : '#34d399'
+                // Keine Farbe: Was ein guter Marktanteil ist, hängt von der Branche ab
+                const pctColor = '#c8d3e6'
                 return (
                   <tr key={i}>
                     <td style={tdL}>{r.postal_code || '—'}</td>
@@ -108,7 +119,10 @@ export default function PlzPage() {
                     <td style={{ ...td, fontFamily:'monospace' }}>{(r.order_count||0).toLocaleString('de-DE')}</td>
                     <td style={{ ...td, fontFamily:'monospace' }}>{r.revenue ? `${Number(r.revenue).toFixed(0)} €` : '—'}</td>
                     <td style={{ ...td, color:'#f5a623', fontFamily:'monospace' }}>
-                      {r._pop ? r._pop.toLocaleString('de-DE') : <span style={{color:'#4a5a70',fontSize:'11px'}}>k.A.</span>}
+                      {r._pop ? r._pop.toLocaleString('de-DE') : <span title={MISSING_POPULATION_TEXT} style={{color:'#4a5a70',fontSize:'11px'}}>— keine Quelle</span>}
+                    </td>
+                    <td style={{ ...td, color:'#f5a623', fontFamily:'monospace' }}>
+                      {r._households ? r._households.toLocaleString('de-DE') : <span style={{color:'#4a5a70',fontSize:'11px'}}>—</span>}
                     </td>
                     <td style={{ ...td, fontFamily:'monospace' }}>
                       {pct !== null
@@ -129,7 +143,7 @@ export default function PlzPage() {
             </tbody>
           </table>
           <p style={{ fontSize:'11px', color:'#4a5a70', marginTop:'16px', fontStyle:'italic' }}>
-            Einwohner: Zensus 2022 · Marktanteil = Kunden ÷ Einwohner × 100
+            Einwohner und Haushalte: {POPULATION_SOURCE_TEXT}. „— keine Quelle“: Für diese PLZ liegt keine belegte Zahl vor; Marktanteil und „nicht erreicht“ werden dann nicht berechnet. Marktanteil = Kunden ÷ Einwohner × 100. Kunden sind Personen, Einwohner ebenfalls; Haushalte sind etwas anderes als Hausadressen.
           </p>
         </div>
       </>)}

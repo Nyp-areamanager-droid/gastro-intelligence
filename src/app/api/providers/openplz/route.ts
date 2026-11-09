@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createServerSupabaseClient, createReferenceDataClient } from '@/lib/supabase/server'
 import { resolveCompanyContext, hasRole, ADMIN_ROLES } from '@/lib/auth/company-context'
-import { openplzProvider, censusProvider } from '@/lib/providers'
+import { openplzProvider } from '@/lib/providers'
 import { invalidateStreetDirectory } from '@/lib/geo/street-directory'
 
 // GET /api/providers/openplz?plz=51063&refresh=false
@@ -34,7 +34,6 @@ export async function GET(req: NextRequest) {
   const start = Date.now()
   const dir = await openplzProvider.getStreetDirectory(plz)
   const plzInfo = await openplzProvider.getPostalCodeInfo(plz)
-  const census = censusProvider.getCensusData(plz)
   const duration = Date.now() - start
 
   if (dir.status !== 'complete') {
@@ -57,29 +56,19 @@ export async function GET(req: NextRequest) {
       warning: dir.status === 'empty'
         ? `Keine Straßen für PLZ ${plz} in OpenPLZ gefunden. Die PLZ existiert möglicherweise nicht.`
         : `Straßenverzeichnis für PLZ ${plz} unvollständig (${dir.reason}). Es wurde nichts gespeichert.`,
-      census: census || { warning: `Einwohnerzahl für PLZ ${plz} nicht im Zensus 2022 vorhanden.` },
     })
   }
 
   const streets = dir.streets
 
-  // Postal Code upserten. Einwohnerfelder nur mitschicken, wenn wirklich
-  // Werte vorliegen: sonst würde ein Aufruf vorhandene Einwohnerzahlen im
-  // gemeinsamen Bestand mit null überschreiben.
+  // Postal Code upserten. Einwohnerfelder werden hier nie geschrieben: Sie
+  // kommen nur aus dem Zensus-Import (siehe lib/geo/population.ts).
   await supabase.from('postal_codes').upsert({
     postal_code: plz,
     city: plzInfo?.city || plz,
     state: plzInfo?.state || null,
     district: plzInfo?.district || null,
     municipality: plzInfo?.municipality || null,
-    ...(census?.population
-      ? {
-          population: census.population,
-          households: census.households || null,
-          population_year: census.year || null,
-          population_source: 'census',
-        }
-      : {}),
     data_source: 'openplz',
     trust_level: 'official',
     last_fetched_at: new Date().toISOString(),
@@ -122,8 +111,5 @@ export async function GET(req: NextRequest) {
     count: streets.length,
     complete: true,
     source: 'openplz',
-    census: census || {
-      warning: `Einwohnerzahl für PLZ ${plz} nicht im Zensus 2022 vorhanden. Bitte manuell ergänzen oder alternative Quelle nutzen.`,
-    },
   })
 }

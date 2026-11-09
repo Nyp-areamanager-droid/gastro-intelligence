@@ -6,7 +6,7 @@ import {
 } from '../src/lib/import/import-guard'
 import { mergeCustomers } from '../src/lib/analysis/merge-customers'
 import { computeDashboardKPIs, normalizeCity, generateRecommendations, parseAndCleanRows, detectColumns, computeRFM } from '../src/lib/analysis/engine'
-import { getPopulation } from '../src/lib/census'
+import { verifiedPopulation, ZENSUS_METHOD } from '../src/lib/geo/population'
 import type { ParsedCustomerRow, StreetAnalysisResult } from '../src/types'
 
 const enc = (s: string) => new TextEncoder().encode(s).buffer as ArrayBuffer
@@ -110,8 +110,11 @@ describe('Zwei Zeiträume: Bestellungen addiert, Personen einmal gezählt', () =
     expect(k.total_orders).toBe(12)
     expect(k.total_revenue).toBe(240)
     expect(k.avg_order_value).toBe(20)
-    // Personen: +491, +492, Eva Berg, +493, 2× ohne Kennung = 6
-    expect(k.total_customers).toBe(6)
+    // Personen: +491, +492, +493 eindeutig. Eva Berg hat weder Kundennummer
+    // noch Telefon: Name + Adresse reicht nicht → 2 Datensätze. Dazu 2 ohne
+    // jede Angabe. Zusammen 7 Kunden, davon 4 Datensätze ohne Kennung.
+    expect(k.total_customers).toBe(7)
+    expect(k.unidentified_records).toBe(4)
   })
   it('zusammengefasster Kunde hat beide Zeiträume', () => {
     const p1 = merged.find(m => m.phone_normalized === '+491')!
@@ -124,8 +127,59 @@ describe('Zwei Zeiträume: Bestellungen addiert, Personen einmal gezählt', () =
     const agg = [r({ street_normalized: 'ring', full_name: 'X', _is_aggregated: true }), r({ street_normalized: 'ring', full_name: 'X', _is_aggregated: true })]
     expect(mergeCustomers(agg).length).toBe(2)
   })
+  it('Kundennummer erkennt dieselbe Person, auch ohne Telefon', () => {
+    const m = mergeCustomers([r({ customer_ref: 'K-17', total_orders: 2, total_revenue: 30 }), r({ customer_ref: 'k-17 ', total_orders: 1, total_revenue: 12 })])
+    expect(m).toHaveLength(1)
+    expect(m[0].total_orders).toBe(3)
+    expect(m[0].total_revenue).toBe(42)
+  })
+  it('gleiche Straße oder gleicher Name ohne Kennung: NIE ein Kunde', () => {
+    const m = mergeCustomers([
+      r({ full_name: 'Anna Schmidt', street_normalized: 'ring', house_number: '4' }),
+      r({ full_name: 'Anna Schmidt', street_normalized: 'ring', house_number: '4' }),
+      r({ street_normalized: 'ring', house_number: '6' }),
+      r({ street_normalized: 'ring', house_number: '6' }),
+    ])
+    expect(m).toHaveLength(4)
+    expect(computeDashboardKPIs(m).unidentified_records).toBe(4)
+  })
   it('ohne Zusammenfassung wären es 8 Kunden – genau der Doppelzählfehler', () => {
     expect(computeDashboardKPIs(computeRFM([...oktober, ...november])).total_customers).toBe(8)
+  })
+})
+
+describe('Export mit einer Zeile je Bestellung', () => {
+  const map = detectColumns(['Bestellnummer', 'Kundennummer', 'PLZ', 'Straße', 'Umsatz', 'Datum'])
+  it('Kundennummer und Bestellnummer werden erkannt, nicht als Anzahl gelesen', () => {
+    expect(map.customer_ref).toBe('Kundennummer')
+    expect(map.order_ref).toBe('Bestellnummer')
+    expect(map.customer_count).toBeUndefined()
+  })
+  it('zwei Bestellungen desselben Kunden: beide zählen, ein Kunde', () => {
+    const { rows, duplicates } = parseAndCleanRows([
+      { Bestellnummer: 'B1', Kundennummer: 'K1', PLZ: '04109', 'Straße': 'Markt 1', Umsatz: '20,00', Datum: '01.11.2026' },
+      { Bestellnummer: 'B2', Kundennummer: 'K1', PLZ: '04109', 'Straße': 'Markt 1', Umsatz: '20,00', Datum: '01.11.2026' },
+      { Bestellnummer: 'B2', Kundennummer: 'K1', PLZ: '04109', 'Straße': 'Markt 1', Umsatz: '20,00', Datum: '01.11.2026' }, // echte Doppelzeile
+      { Bestellnummer: 'B3', Kundennummer: 'K2', PLZ: '04109', 'Straße': 'Markt 1', Umsatz: '15,50', Datum: '02.11.2026' },
+    ], map)
+    expect(duplicates).toBe(1)
+    const k = computeDashboardKPIs(mergeCustomers(computeRFM(rows)))
+    expect(k.total_orders).toBe(3)
+    expect(k.total_revenue).toBe(55.5)
+    expect(k.total_customers).toBe(2)
+    expect(k.unidentified_records).toBe(0)
+  })
+  it('gleiche Telefonnummer, verschiedene Beträge: früher ging eine Bestellung verloren', () => {
+    const m2 = detectColumns(['Telefon', 'PLZ', 'Straße', 'Umsatz'])
+    const { rows, duplicates } = parseAndCleanRows([
+      { Telefon: '0221 1', PLZ: '50733', 'Straße': 'Ring 1', Umsatz: '20' },
+      { Telefon: '0221 1', PLZ: '50733', 'Straße': 'Ring 1', Umsatz: '35' },
+    ], m2)
+    expect(duplicates).toBe(0)
+    const k = computeDashboardKPIs(mergeCustomers(rows))
+    expect(k.total_revenue).toBe(55)
+    expect(k.total_orders).toBe(2)
+    expect(k.total_customers).toBe(1)
   })
 })
 
@@ -138,10 +192,14 @@ describe('Deutschlandweit', () => {
   ])('Ortsname %s → %s', (input, expected) => {
     expect(normalizeCity(input)).toBe(expected)
   })
-  it('keine erfundene Einwohnerzahl für unbekannte PLZ', () => {
-    expect(getPopulation('01067')).toBeNull()   // Dresden: nicht hinterlegt
-    expect(getPopulation('80331')).toBeNull()   // München: nicht hinterlegt
-    expect(getPopulation('99999')).toBeNull()
+  it('Einwohner nur mit belegter Methode, alte Tabellenwerte werden ignoriert', () => {
+    expect(verifiedPopulation(null)).toEqual({ population: null, households: null, method: null, reference_date: null })
+    // früher als „Zensus 2022“ eingetragen, aber ohne Methode/Herkunft
+    expect(verifiedPopulation({ population: 24800, households: 14200, population_method: null }).population).toBeNull()
+    const v = verifiedPopulation({ population: 18234, households: 10077, population_method: ZENSUS_METHOD, population_reference_date: '2022-05-15' })
+    expect(v).toEqual({ population: 18234, households: 10077, method: ZENSUS_METHOD, reference_date: '2022-05-15' })
+    // 0 oder negativ (z. B. Geheimhaltungszeichen) ist keine Zahl
+    expect(verifiedPopulation({ population: 0, households: -1, population_method: ZENSUS_METHOD }).population).toBeNull()
   })
 })
 

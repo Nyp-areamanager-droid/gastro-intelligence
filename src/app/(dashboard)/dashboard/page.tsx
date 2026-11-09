@@ -5,7 +5,6 @@ import { createClient } from '@/lib/supabase/client'
 import { computeDashboardKPIs, generateRecommendations } from '@/lib/analysis/engine'
 import type { DashboardKPIs, Alert, MarketingRecommendation, PLZAnalysisResult, ParsedCustomerRow } from '@/types'
 import Link from 'next/link'
-import { getPopulation } from '@/lib/census'
 import { fetchAllRows } from '@/lib/supabase/fetch-all'
 import { mergeCustomers } from '@/lib/analysis/merge-customers'
 
@@ -42,6 +41,7 @@ export default function DashboardPage() {
       if (customers?.length) {
         // Dieselbe Person aus mehreren Zeiträumen (ergänzte Uploads) zählt als ein Kunde
         const rows = mergeCustomers(customers.map(c => ({
+          customer_ref: c.customer_ref || undefined,
           phone_normalized: c.phone_normalized || undefined, full_name: c.full_name || undefined,
           house_number: c.house_number || undefined,
           postal_code: c.postal_code, street: c.street, street_normalized: c.street_normalized,
@@ -61,16 +61,12 @@ export default function DashboardPage() {
         const plzAnalyses = Array.from(seenPlz.values()).map(a => ({
           postal_code: a.postal_code || '', city: '', customer_count: a.customer_count || 0,
           order_count: a.order_count || 0, revenue: a.revenue || 0, avg_order_value: a.avg_order_value || 0,
-          orders_per_customer: a.orders_per_customer || 0, population: a.population || getPopulation(a.postal_code || '') || null,
+          orders_per_customer: a.orders_per_customer || 0,
+          // Einwohner nur aus belegter Quelle (gespeichert in der Analyse); sonst „—“
+          population: a.population || null,
           households: null, population_source: null,
-          market_penetration_pct: a.market_penetration_pct || (() => {
-            const pop = a.population || getPopulation(a.postal_code || '')
-            return pop && a.customer_count ? Math.round(a.customer_count / pop * 10000) / 100 : null
-          })(),
-          not_reached_residents: a.not_reached_residents || (() => {
-            const pop = a.population || getPopulation(a.postal_code || '')
-            return pop && a.customer_count ? pop - a.customer_count : null
-          })(),
+          market_penetration_pct: a.population ? (a.market_penetration_pct ?? null) : null,
+          not_reached_residents: a.population ? (a.not_reached_residents ?? null) : null,
           // null = Straßenverzeichnis fehlte → keine Aussage, nicht 0
           not_reached_pct: null, streets_total: a.streets_total ?? null, streets_with_orders: a.streets_with_orders ?? null,
           streets_without_orders: a.streets_without_orders ?? null, streets_coverage_pct: a.streets_coverage_pct ?? null,
@@ -147,6 +143,14 @@ export default function DashboardPage() {
         ))}
       </div>
 
+      {(kpis.unidentified_records ?? 0) > 0 && (
+        <div role="status" style={{ background:'rgba(245,166,35,0.08)', border:'1px solid rgba(245,166,35,0.35)', borderRadius:'10px', padding:'12px 16px', marginTop:'-8px', marginBottom:'24px', fontSize:'13px', color:'#f5c26b' }}>
+          {(kpis.unidentified_records ?? 0).toLocaleString('de-DE')} von {kpis.total_customers.toLocaleString('de-DE')} Kundendatensätzen haben weder Kundennummer noch Telefonnummer.
+          Sie zählen je als ein Kunde. Stammt dieselbe Person aus mehreren Dateien oder Zeilen, ist die Kundenzahl deshalb eher zu hoch.
+          Bestellungen und Umsatz sind davon nicht betroffen.
+        </div>
+      )}
+
       {/* 2-Column */}
       <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'20px', marginBottom:'20px' }}>
         {/* Alerts */}
@@ -204,7 +208,8 @@ export default function DashboardPage() {
               </thead>
               <tbody>
                 {plzData.map(p => {
-                  const mc = p.market_penetration_pct === null ? '#4a5a70' : p.market_penetration_pct < 1 ? '#f87171' : p.market_penetration_pct < 3 ? '#fbbf24' : '#34d399'
+                  // Keine Ampelfarbe: Was ein guter Marktanteil ist, hängt von der Branche ab
+                  const mc = p.market_penetration_pct === null ? '#4a5a70' : '#c8d3e6'
                   return (
                     <tr key={p.postal_code}>
                       <td style={{ textAlign:'left', padding:'10px 0', borderBottom:'1px solid rgba(31,45,69,0.5)', fontFamily:'monospace', color:'#e63027', fontWeight:600 }}>{p.postal_code}</td>
