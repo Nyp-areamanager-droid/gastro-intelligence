@@ -178,6 +178,8 @@ export type Database = {
           processed_at: string | null
           period_start: string | null
           period_end: string | null
+          file_hash: string | null
+          import_mode: string | null
           created_at: string
         }
         Insert: {
@@ -196,6 +198,8 @@ export type Database = {
           processed_at?: string | null
           period_start?: string | null
           period_end?: string | null
+          file_hash?: string | null
+          import_mode?: string | null
           created_at?: string
         }
         Update: {
@@ -214,6 +218,8 @@ export type Database = {
           processed_at?: string | null
           period_start?: string | null
           period_end?: string | null
+          file_hash?: string | null
+          import_mode?: string | null
           created_at?: string
         }
         Relationships: [
@@ -883,7 +889,7 @@ export type Database = {
     }
     Enums: {
       user_role: 'owner' | 'admin' | 'manager' | 'viewer'
-      upload_status: 'pending' | 'processing' | 'completed' | 'failed'
+      upload_status: 'pending' | 'processing' | 'completed' | 'failed' | 'replaced'
       data_source: 'openplz' | 'osm' | 'census' | 'google_places' | 'opendata_city' | 'manual' | 'estimated'
       data_trust_level: 'official' | 'public' | 'estimated' | 'manual'
       street_class: 'A' | 'B' | 'C' | 'D' | 'E'

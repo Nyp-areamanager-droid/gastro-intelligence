@@ -17,34 +17,40 @@ interface UploadResult {
     period: { start: string | null; end: string | null }
   }
   kpis?: Record<string, number>
+  totals?: { customers: number; orders: number; revenue: number }
+  import_mode?: 'first' | 'replace' | 'append'
+  replaced_uploads?: number
   alerts?: number
   recommendations?: number
   error?: string
+  code?: string
+  existing?: { filename: string; uploaded_at: string; period_start: string | null; period_end: string | null }
+}
+
+type Mode = 'auto' | 'replace' | 'append'
+
+function dateDE(iso: string | null | undefined) {
+  if (!iso) return '—'
+  const [y, m, d] = iso.slice(0, 10).split('-')
+  return `${d}.${m}.${y}`
 }
 
 export function FileUploader() {
-  const [status, setStatus] = useState<'idle' | 'uploading' | 'processing' | 'done' | 'error'>('idle')
+  const [status, setStatus] = useState<'idle' | 'uploading' | 'processing' | 'done' | 'error' | 'conflict'>('idle')
   const [result, setResult] = useState<UploadResult | null>(null)
   const [progress, setProgress] = useState(0)
+  const [pendingFile, setPendingFile] = useState<File | null>(null)
+  const [showPeriod, setShowPeriod] = useState(false)
+  const [periodStart, setPeriodStart] = useState('')
+  const [periodEnd, setPeriodEnd] = useState('')
   const supabase = createClient()
 
-  const onDrop = useCallback(async (files: File[]) => {
-    const file = files[0]
-    if (!file) return
-
-    const allowed = ['.xlsx','.xls','.xlsb','.csv']
-    const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase()
-    if (!allowed.includes(ext)) {
-      setResult({ success: false, error: `Nicht unterstütztes Format: ${ext}. Erlaubt: ${allowed.join(', ')}` })
-      setStatus('error')
-      return
-    }
-
+  const send = useCallback(async (file: File, mode: Mode, period?: { start: string; end: string }) => {
     setStatus('uploading')
     setProgress(10)
 
     const { data: { user } } = await supabase.auth.getUser()
-    if (!user) { setStatus('error'); setResult({ success: false, error: 'Nicht angemeldet' }); return }
+    if (!user) { setStatus('error'); setResult({ success: false, error: 'Sie sind nicht mehr angemeldet. Bitte melden Sie sich erneut an.' }); return }
 
     const { data: membership } = await supabase
       .from('company_users').select('company_id').eq('user_id', user.id).single()
@@ -57,7 +63,9 @@ export function FileUploader() {
     const formData = new FormData()
     formData.append('file', file)
     formData.append('company_id', membership.company_id)
-    formData.append('user_id', user.id)
+    formData.append('mode', mode)
+    if (period?.start) formData.append('period_start', period.start)
+    if (period?.end) formData.append('period_end', period.end)
 
     setProgress(30)
     setStatus('processing')
@@ -82,15 +90,42 @@ export function FileUploader() {
         setStatus('done')
         setResult(data)
         setProgress(100)
+        setPendingFile(null)
+        setShowPeriod(false)
+      } else if (res.status === 409) {
+        // Es gibt schon Daten: Nutzer entscheidet, nichts wurde gespeichert
+        setStatus('conflict')
+        setResult(data)
+        if (data.code === 'append_period_unknown' || data.code === 'append_overlap' || data.code === 'invalid_period') setShowPeriod(true)
       } else {
         setStatus('error')
         setResult(data)
       }
-    } catch (err) {
+    } catch {
       setStatus('error')
       setResult({ success: false, error: 'Die Verbindung wurde unterbrochen. Bitte prüfen Sie Ihre Internetverbindung und versuchen Sie es erneut.' })
     }
   }, [])
+
+  const onDrop = useCallback(async (files: File[]) => {
+    const file = files[0]
+    if (!file) return
+
+    const allowed = ['.xlsx','.xls','.xlsb','.csv']
+    const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase()
+    if (!allowed.includes(ext)) {
+      setResult({ success: false, error: `Dieses Dateiformat wird nicht unterstützt (${ext}). Möglich sind: ${allowed.join(', ')}` })
+      setStatus('error')
+      return
+    }
+    setPendingFile(file)
+    setShowPeriod(false)
+    setPeriodStart('')
+    setPeriodEnd('')
+    await send(file, 'auto')
+  }, [send])
+
+  const reset = () => { setStatus('idle'); setResult(null); setProgress(0); setPendingFile(null); setShowPeriod(false) }
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
@@ -100,7 +135,7 @@ export function FileUploader() {
       'text/csv': ['.csv'],
     },
     maxFiles: 1,
-    disabled: status === 'uploading' || status === 'processing',
+    disabled: status === 'uploading' || status === 'processing' || status === 'conflict',
   })
 
   return (
@@ -164,6 +199,55 @@ export function FileUploader() {
         )}
       </div>
 
+      {/* Es gibt schon Daten: ersetzen oder ergänzen? */}
+      {status === 'conflict' && result && pendingFile && (
+        <div className="mt-6 card space-y-4 border border-amber-500/40">
+          <div className="text-amber-300 font-semibold">Bitte entscheiden: Was soll mit „{pendingFile.name}“ passieren?</div>
+          <div className="text-sm text-[#c8d3e6]">{result.error}</div>
+          {result.existing && (
+            <div className="text-xs text-[#8a9bb5]">
+              Bisher: „{result.existing.filename}“, hochgeladen am {dateDE(result.existing.uploaded_at)}
+              {result.existing.period_start || result.existing.period_end
+                ? `, Zeitraum ${dateDE(result.existing.period_start)} bis ${dateDE(result.existing.period_end)}` : ', Zeitraum unbekannt'}
+            </div>
+          )}
+          <div className="text-xs text-[#8a9bb5]">Es wurde noch nichts gespeichert.</div>
+
+          {showPeriod && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <label className="text-xs text-[#8a9bb5]">Zeitraum der neuen Datei von
+                <input type="date" value={periodStart} onChange={e => setPeriodStart(e.target.value)} className="input w-full mt-1" />
+              </label>
+              <label className="text-xs text-[#8a9bb5]">bis
+                <input type="date" value={periodEnd} onChange={e => setPeriodEnd(e.target.value)} className="input w-full mt-1" />
+              </label>
+            </div>
+          )}
+
+          <div className="flex flex-col sm:flex-row gap-2">
+            <button className="btn-primary flex-1" onClick={() => send(pendingFile, 'replace')}>
+              Daten ersetzen
+            </button>
+            {result.code !== 'duplicate_file' && result.code !== 'append_same_data' && (
+              <button
+                className="btn-ghost flex-1"
+                disabled={showPeriod && !periodStart}
+                onClick={() => showPeriod
+                  ? send(pendingFile, 'append', { start: periodStart, end: periodEnd })
+                  : send(pendingFile, 'append')}
+              >
+                {showPeriod ? 'Zeitraum ergänzen' : 'Neuen Zeitraum ergänzen'}
+              </button>
+            )}
+            <button className="btn-ghost flex-1" onClick={reset}>Abbrechen</button>
+          </div>
+          <div className="text-xs text-[#4a5a70] space-y-1">
+            <div><b>Daten ersetzen:</b> Die neue Datei enthält alle Kunden und Bestellungen. Die bisherigen Kundendaten werden gelöscht und durch die neue Datei ersetzt.</div>
+            <div><b>Neuen Zeitraum ergänzen:</b> Die neue Datei enthält nur Bestellungen nach dem bisherigen Zeitraum, zum Beispiel den neuen Monat. Sie wird dazugezählt.</div>
+          </div>
+        </div>
+      )}
+
       {/* Ergebnis */}
       {status === 'done' && result?.summary && (
         <div className="mt-6 space-y-4">
@@ -185,15 +269,32 @@ export function FileUploader() {
             </div>
           )}
 
+          {result.import_mode && result.import_mode !== 'first' && (
+            <div className="card text-sm text-emerald-300">
+              {result.import_mode === 'replace'
+                ? 'Die bisherigen Kundendaten wurden durch diese Datei ersetzt.'
+                : 'Der neue Zeitraum wurde zu den bisherigen Daten hinzugefügt. Kunden, die in beiden Zeiträumen bestellt haben, zählen einmal.'}
+            </div>
+          )}
+
+          {result.totals && (
+            <div className="card text-sm text-[#8a9bb5]">
+              <span className="font-semibold text-white">Gesamtbestand jetzt:</span>{' '}
+              {result.totals.customers.toLocaleString('de-DE')} Kunden ·{' '}
+              {result.totals.orders.toLocaleString('de-DE')} Bestellungen ·{' '}
+              {result.totals.revenue.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} € Umsatz
+            </div>
+          )}
+
           {result.summary.period.start && (
             <div className="card text-sm text-[#8a9bb5]">
               <span className="font-semibold text-white">Zeitraum:</span>{' '}
-              {result.summary.period.start} — {result.summary.period.end}
+              {dateDE(result.summary.period.start)} bis {dateDE(result.summary.period.end)}
             </div>
           )}
 
           <button
-            onClick={() => { setStatus('idle'); setResult(null); setProgress(0) }}
+            onClick={reset}
             className="btn-ghost w-full"
           >
             Weitere Datei hochladen

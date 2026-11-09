@@ -5,12 +5,16 @@ import { resolveCompanyContext, canWriteCompanyData, sanitizeStorageFileName } f
 import {
   detectColumns, parseAndCleanRows, computeRFM,
   computeDashboardKPIs, generateAlerts, generateRecommendations,
-  analyzeStreets, analyzePLZ, NO_STREET_DIRECTORY
+  analyzeStreets, analyzePLZ,
 } from '@/lib/analysis/engine'
 import { streetNameKey } from '@/lib/geo/street-name'
 import { readWorkbook } from '@/lib/import/read-table'
 import { DataProviderOrchestrator, censusProvider } from '@/lib/providers'
-import { getPopulation } from '@/lib/census'
+import { fetchAllRows } from '@/lib/supabase/fetch-all'
+import {
+  parseImportMode, parsePeriodDate, fileFingerprint, decideImport, overlapShare,
+  rowFingerprint, mergeCustomers, SAME_DATA_SHARE, type ExistingUpload,
+} from '@/lib/import/import-guard'
 import type { ParsedCustomerRow } from '@/types'
 
 export const maxDuration = 60 // Vercel: max 60s für Pro plan
@@ -65,20 +69,94 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ── 1. Datei in Supabase Storage hochladen ────────────────────────────────
+    // ── 1. Datei lesen und prüfen, BEVOR etwas gespeichert wird ──────────────
+    const mode = parseImportMode(formData.get('mode'))
+    const userPeriod = {
+      start: parsePeriodDate(formData.get('period_start')),
+      end: parsePeriodDate(formData.get('period_end')),
+    }
     const fileBuffer = await file.arrayBuffer()
-    const storagePath = `${companyId}/${Date.now()}_${sanitizeStorageFileName(file.name)}`
+    const fileHash = fileFingerprint(fileBuffer)
 
+    const workbook = readWorkbook(fileBuffer, file.name, file.type)
+    const worksheet = workbook.Sheets[workbook.SheetNames[0]]
+    const rawRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: '' })
+
+    if (!rawRows.length) {
+      return NextResponse.json({ error: 'Die Datei enthält keine Datenzeilen, nur eine Kopfzeile oder gar nichts.' }, { status: 400 })
+    }
+
+    const headers = Object.keys(rawRows[0])
+    const columnMapping = detectColumns(headers)
+    if (!columnMapping.postal_code) {
+      return NextResponse.json({
+        error: 'In der Datei wurde keine Spalte mit Postleitzahlen gefunden. Bitte eine Spalte „PLZ“ ergänzen und erneut hochladen.',
+        headers, detected: columnMapping,
+      }, { status: 422 })
+    }
+
+    const { rows: cleanedRows, duplicates, errors, invalid_values: invalidValues } = parseAndCleanRows(rawRows, columnMapping)
+    const rowsWithRFM = computeRFM(cleanedRows)
+    if (!rowsWithRFM.length) {
+      return NextResponse.json({ error: 'Keine Zeile der Datei hatte eine gültige Postleitzahl. Es wurde nichts importiert.' }, { status: 422 })
+    }
+
+    // Zeitraum: Angabe des Nutzers, sonst aus den Bestelldaten der Datei
+    const dates = rowsWithRFM.map(r => r.last_order_date).filter(Boolean).sort() as string[]
+    const periodStart = userPeriod.start ?? (dates[0] || null)
+    const periodEnd = userPeriod.end ?? (dates[dates.length - 1] || null)
+
+    // ── 2. Wiederholter Import? Doppelzählung ausschließen ───────────────────
+    let existingQuery = supabase
+      .from('uploads')
+      .select('id, filename, created_at, file_hash, period_start, period_end')
+      .eq('company_id', companyId)
+      .eq('status', 'completed')
+    existingQuery = storeId ? existingQuery.eq('store_id', storeId) : existingQuery.is('store_id', null)
+    const { data: existingUploads, error: existingError } = await existingQuery
+    if (existingError) {
+      return NextResponse.json({ error: 'Bisherige Uploads konnten nicht geprüft werden. Bitte versuchen Sie es erneut.' }, { status: 500 })
+    }
+
+    const decision = decideImport({
+      mode, fileHash,
+      existing: (existingUploads || []) as ExistingUpload[],
+      newPeriod: { start: periodStart, end: periodEnd },
+    })
+    if (decision.ok === false) {
+      return NextResponse.json({ error: decision.message, code: decision.code, existing: decision.existing }, { status: 409 })
+    }
+
+    // Ergänzung mit weitgehend denselben Zeilen = dieselben Daten (z. B. als
+    // CSV statt Excel gespeichert) → ablehnen
+    if (decision.action === 'append') {
+      const { data: existingRows, error: rowsError } = await fetchAllRows((from, to) =>
+        supabase.from('customers')
+          .select('postal_code, street_normalized, house_number, phone_normalized, total_orders, total_revenue', { count: 'exact' })
+          .eq('company_id', companyId).order('id').range(from, to))
+      if (rowsError) {
+        return NextResponse.json({ error: 'Bisherige Daten konnten nicht geprüft werden. Bitte versuchen Sie es erneut.' }, { status: 500 })
+      }
+      const share = overlapShare(rowsWithRFM.map(rowFingerprint), (existingRows || []).map(rowFingerprint))
+      if (share >= SAME_DATA_SHARE) {
+        return NextResponse.json({
+          code: 'append_same_data',
+          error: `${Math.round(share * 100)} % der Zeilen dieser Datei sind bereits genau so vorhanden. Das sind offenbar dieselben Daten, sie würden doppelt gezählt. Es wurde nichts importiert. Wenn die Datei die bisherigen Daten ersetzen soll, wählen Sie „Daten ersetzen“.`,
+        }, { status: 409 })
+      }
+    }
+
+    // ── 3. Datei in Supabase Storage speichern ───────────────────────────────
+    const storagePath = `${companyId}/${Date.now()}_${sanitizeStorageFileName(file.name)}`
     const { error: storageError } = await supabase.storage
       .from('uploads')
       .upload(storagePath, fileBuffer, { contentType: file.type })
-
     if (storageError) {
       console.error('Storage-Upload fehlgeschlagen:', storageError.message)
       return NextResponse.json({ error: 'Die Datei konnte nicht gespeichert werden. Bitte versuchen Sie es erneut.' }, { status: 500 })
     }
 
-    // ── 2. Upload-Datensatz erstellen ─────────────────────────────────────────
+    // ── 4. Upload-Datensatz erstellen ────────────────────────────────────────
     const { data: upload, error: uploadError } = await supabase
       .from('uploads')
       .insert({
@@ -90,49 +168,25 @@ export async function POST(req: NextRequest) {
         file_size_bytes: file.size,
         file_type: file.type,
         status: 'processing',
+        file_hash: fileHash,
+        import_mode: decision.action,
+        column_mapping: columnMapping,
       })
       .select()
       .single()
-
     if (uploadError || !upload) {
-      return NextResponse.json({ error: 'Upload-Record konnte nicht erstellt werden' }, { status: 500 })
+      return NextResponse.json({ error: 'Der Upload konnte nicht angelegt werden. Bitte versuchen Sie es erneut.' }, { status: 500 })
     }
 
-    // ── 3. Excel parsen ───────────────────────────────────────────────────────
-    const workbook = readWorkbook(fileBuffer, file.name, file.type)
-    const worksheet = workbook.Sheets[workbook.SheetNames[0]]
-    const rawRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: '' })
-
-    if (!rawRows.length) {
-      await supabase.from('uploads').update({ status: 'failed', error_message: 'Datei leer' }).eq('id', upload.id)
-      return NextResponse.json({ error: 'Die Datei enthält keine Datenzeilen, nur eine Kopfzeile oder gar nichts.' }, { status: 400 })
+    // Bei einem Fehler ab hier: eigene neue Zeilen entfernen, Upload als
+    // fehlgeschlagen markieren. Die bisherigen Daten bleiben dann unverändert.
+    const failUpload = async (message: string) => {
+      await supabase.from('customers').delete().eq('company_id', companyId).eq('upload_id', upload.id)
+      await supabase.from('uploads').update({ status: 'failed', error_message: message }).eq('id', upload.id)
+      return NextResponse.json({ error: message }, { status: 500 })
     }
 
-    // ── 4. Spalten erkennen ───────────────────────────────────────────────────
-    const headers = Object.keys(rawRows[0])
-    const columnMapping = detectColumns(headers)
-
-    if (!columnMapping.postal_code) {
-      await supabase.from('uploads').update({
-        status: 'failed',
-        error_message: 'Keine PLZ-Spalte erkannt. Bitte Spalten manuell zuordnen.'
-      }).eq('id', upload.id)
-      return NextResponse.json({
-        error: 'In der Datei wurde keine Spalte mit Postleitzahlen gefunden. Bitte eine Spalte „PLZ“ ergänzen und erneut hochladen.',
-        headers, detected: columnMapping,
-      }, { status: 422 })
-    }
-
-    // ── 5. Bereinigung + RFM ──────────────────────────────────────────────────
-    const { rows: cleanedRows, duplicates, errors, invalid_values: invalidValues } = parseAndCleanRows(rawRows, columnMapping)
-    const rowsWithRFM = computeRFM(cleanedRows)
-
-    // Datumsbereich
-    const dates = rowsWithRFM.map(r => r.last_order_date).filter(Boolean) as string[]
-    const periodStart = dates.length ? dates.sort()[0] : null
-    const periodEnd = dates.length ? dates.sort().reverse()[0] : null
-
-    // ── 6. Kunden in DB speichern (upsert, Batches à 500) ────────────────────
+    // ── 5. Kunden speichern (Batches à 500) ──────────────────────────────────
     const BATCH = 500
     for (let i = 0; i < rowsWithRFM.length; i += BATCH) {
       const batch = rowsWithRFM.slice(i, i + BATCH)
@@ -160,18 +214,54 @@ export async function POST(req: NextRequest) {
         platform: r.platform || null,
         late_deliveries: r.late_deliveries || 0,
       }))
-
-      await supabase.from('customers').insert(records)
+      const { error: insertError } = await supabase.from('customers').insert(records)
+      if (insertError) {
+        console.error('Kunden-Import fehlgeschlagen:', insertError.message)
+        return failUpload('Die Kundendaten konnten nicht vollständig gespeichert werden. Es wurde nichts übernommen, die bisherigen Daten sind unverändert.')
+      }
     }
 
-    // ── 7. Analyse pro PLZ ────────────────────────────────────────────────────
+    // ── 6. „Daten ersetzen“: bisherige Kundendaten entfernen ─────────────────
+    if (decision.action === 'replace' && decision.replaceUploadIds.length) {
+      for (let i = 0; i < decision.replaceUploadIds.length; i += 100) {
+        const ids = decision.replaceUploadIds.slice(i, i + 100)
+        const { error: delError } = await supabase.from('customers').delete().eq('company_id', companyId).in('upload_id', ids)
+        if (delError) {
+          console.error('Ersetzen fehlgeschlagen:', delError.message)
+          return failUpload('Die bisherigen Daten konnten nicht ersetzt werden. Es wurde nichts übernommen, die bisherigen Daten sind unverändert.')
+        }
+        await supabase.from('uploads').update({ status: 'replaced' }).eq('company_id', companyId).in('id', ids)
+      }
+    }
+
+    // ── 7. Gesamtbestand: neue Datei + übrige gespeicherte Kunden ────────────
+    // Die Auswertungen gelten für ALLE Daten der Firma, nicht nur für die
+    // letzte Datei. Dieselbe Person aus mehreren Zeiträumen zählt einmal.
+    const { data: otherCustomers, error: otherError } = await fetchAllRows((from, to) =>
+      supabase.from('customers').select('*', { count: 'exact' })
+        .eq('company_id', companyId).neq('upload_id', upload.id).order('id').range(from, to))
+    if (otherError) {
+      return failUpload('Die Auswertung konnte nicht erstellt werden. Es wurde nichts übernommen.')
+    }
+    const allRows = mergeCustomers([
+      ...rowsWithRFM,
+      ...(otherCustomers || []).map(customerRecordToRow),
+    ])
+
     const plzGroups = new Map<string, ParsedCustomerRow[]>()
-    for (const r of rowsWithRFM) {
+    for (const r of allRows) {
       if (!plzGroups.has(r.postal_code!)) plzGroups.set(r.postal_code!, [])
       plzGroups.get(r.postal_code!)!.push(r)
     }
 
-    // Hole Company Google Places Key
+    // PLZ-Auswertungen ohne Kunden mehr (nach „Daten ersetzen“) entfernen
+    const { data: oldAnalytics } = await supabase.from('analytics').select('id, postal_code').eq('company_id', companyId)
+    const staleIds = (oldAnalytics || []).filter(a => !plzGroups.has(a.postal_code)).map(a => a.id)
+    for (let i = 0; i < staleIds.length; i += 100) {
+      await supabase.from('analytics').delete().eq('company_id', companyId).in('id', staleIds.slice(i, i + 100))
+    }
+
+    // ── 8. Analyse pro PLZ ───────────────────────────────────────────────────
     const { data: company } = await supabase
       .from('companies')
       .select('google_places_api_key')
@@ -180,6 +270,7 @@ export async function POST(req: NextRequest) {
 
     const orchestrator = new DataProviderOrchestrator(company?.google_places_api_key || undefined)
     const plzAnalyses = []
+    const allStreetResults: ReturnType<typeof analyzeStreets> = []
 
     for (const [plz, plzRows] of plzGroups) {
       // Straßenverzeichnis live laden (vollständig oder ausdrücklich unvollständig).
@@ -199,8 +290,6 @@ export async function POST(req: NextRequest) {
           last_fetched_at: new Date().toISOString(),
         }, { onConflict: 'postal_code' })
 
-        // Liste der PLZ ersetzen: Alte (evtl. gekürzte) Einträge entfernen,
-        // vollständige Liste neu schreiben.
         const fetchedAt = new Date().toISOString()
         const cacheRecords = streetDir.streets.map(name => ({
           postal_code: plz,
@@ -217,28 +306,25 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // PLZ-Bevölkerungsdaten (postal_codes DB oder CENSUS-Fallback)
+      // Einwohner/Haushalte: gespeicherte Werte, sonst hinterlegte Tabelle.
+      // Keine Schätzwerte: Unbekannt bleibt unbekannt (null).
       const { data: plzData } = await supabase
         .from('postal_codes')
         .select('population, households')
         .eq('postal_code', plz)
-        .single()
-
-      // CENSUS-Fallback wenn postal_codes keine Population hat
+        .maybeSingle()
       const censusData = censusProvider.getCensusData(plz)
-      // Dreifacher Fallback: DB → providers/CENSUS_DATA → census.ts (mit Schätzwert)
-      const population = plzData?.population || censusData?.population || getPopulation(plz) || null
+      const population = plzData?.population || censusData?.population || null
       const households = plzData?.households || censusData?.households || null
 
-      // Population in postal_codes schreiben falls noch nicht vorhanden
-      if (!plzData?.population && population) {
+      if (!plzData?.population && censusData?.population) {
         try {
           await reference.from('postal_codes').upsert({
             postal_code: plz,
             city: plzRows[0]?.city || plz,
-            population,
-            households,
-            population_year: 2022,
+            population: censusData.population,
+            households: censusData.households,
+            population_year: censusData.year,
             data_source: 'census',
             trust_level: 'official',
             last_fetched_at: new Date().toISOString(),
@@ -248,19 +334,14 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      const analysis = analyzePLZ(
-        plzRows,
-        directory,
-        population,
-        households,
-      )
+      const analysis = analyzePLZ(plzRows, directory, population, households)
       if (!streetDir.complete && streetDir.error) analysis.warnings.push(`⚠️ ${streetDir.error}`)
       plzAnalyses.push(analysis)
 
-      // Straßen-Analyse
       const streetResults = analyzeStreets(plzRows, directory)
+      allStreetResults.push(...streetResults)
 
-      // Analytics in DB speichern (alte Einträge für diese PLZ+Company entfernen um Duplikate zu vermeiden)
+      // Alte Auswertung dieser PLZ ersetzen (keine Duplikate)
       await supabase.from('analytics').delete().eq('company_id', companyId).eq('postal_code', plz)
 
       const { data: analyticsRecord } = await supabase
@@ -295,8 +376,6 @@ export async function POST(req: NextRequest) {
         .single()
 
       // Straßen-Analytics speichern: alle Straßen, auch ohne Bestellungen
-      // (früher nur die ersten 200 nach Bestellungen – Straßen ohne
-      // Bestellungen fielen dabei als erste weg)
       if (analyticsRecord) {
         const streetRecords = streetResults.map(s => ({
           analytics_id: analyticsRecord.id,
@@ -318,10 +397,11 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ── 8. Dashboard KPIs + Alerts + Empfehlungen ─────────────────────────────
-    const kpis = computeDashboardKPIs(rowsWithRFM)
-    const streetResultsAll = rowsWithRFM.length > 0 ? analyzeStreets(rowsWithRFM, NO_STREET_DIRECTORY) : []
-    const recs = generateRecommendations(kpis, plzAnalyses, streetResultsAll)
+    // ── 9. Kennzahlen, Warnungen, Empfehlungen aus dem Gesamtbestand ─────────
+    const kpis = computeDashboardKPIs(allRows)
+    // Straßenergebnisse je PLZ (mit Verzeichnis), damit Empfehlungen zu
+    // Straßen ohne Bestellung auf geprüften Daten beruhen
+    const recs = generateRecommendations(kpis, plzAnalyses, allStreetResults)
     const alertPayloads = generateAlerts(kpis)
 
     // Alte, noch offene Warnungen und unbearbeitete Empfehlungen werden durch
@@ -334,14 +414,12 @@ export async function POST(req: NextRequest) {
       .update({ status: 'replaced' })
       .eq('company_id', companyId).eq('status', 'recommended')
 
-    // Alerts speichern
     if (alertPayloads.length) {
       await supabase.from('alerts').insert(
         alertPayloads.map(a => ({ ...a, company_id: companyId, store_id: storeId || null }))
       )
     }
 
-    // Marketing-Empfehlungen speichern
     if (recs.length) {
       await supabase.from('marketing_actions').insert(
         recs.map(r => ({
@@ -359,11 +437,10 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    // ── 9. Upload abschließen ─────────────────────────────────────────────────
+    // ── 10. Upload abschließen ───────────────────────────────────────────────
     await supabase.from('uploads').update({
       status: 'completed',
       row_count: rowsWithRFM.length,
-      column_mapping: columnMapping,
       period_start: periodStart,
       period_end: periodEnd,
       processed_at: new Date().toISOString(),
@@ -372,14 +449,21 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       success: true,
       upload_id: upload.id,
+      import_mode: decision.action,
+      replaced_uploads: decision.replaceUploadIds.length,
       summary: {
         total_rows: rawRows.length,
         valid_rows: rowsWithRFM.length,
         duplicate_rows: duplicates,
         error_rows: errors,
         invalid_value_rows: invalidValues,
-        unique_plz: plzGroups.size,
+        unique_plz: new Set(rowsWithRFM.map(r => r.postal_code)).size,
         period: { start: periodStart, end: periodEnd },
+      },
+      totals: {
+        customers: kpis.total_customers,
+        orders: kpis.total_orders,
+        revenue: kpis.total_revenue,
       },
       kpis,
       alerts: alertPayloads.length,
@@ -394,4 +478,20 @@ export async function POST(req: NextRequest) {
       { status: 500 }
     )
   }
+}
+
+/** Gespeicherter Kundendatensatz → Analyse-Zeile */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function customerRecordToRow(c: any): ParsedCustomerRow {
+  return {
+    _row_index: 0, _errors: [],
+    phone_normalized: c.phone_normalized || undefined, phone_raw: c.phone_raw || undefined,
+    first_name: c.first_name || undefined, last_name: c.last_name || undefined, full_name: c.full_name || undefined,
+    street: c.street || undefined, street_normalized: c.street_normalized || undefined, house_number: c.house_number || undefined,
+    postal_code: c.postal_code, city: c.city || undefined,
+    total_orders: c.total_orders ?? 1, total_revenue: Number(c.total_revenue ?? 0),
+    avg_order_value: c.avg_order_value ?? undefined, last_order_date: c.last_order_date || undefined,
+    rfm_segment: c.rfm_segment || undefined, rfm_score: c.rfm_score || undefined,
+    is_vip: !!c.is_vip, platform: c.platform || undefined, late_deliveries: c.late_deliveries || 0,
+  } as ParsedCustomerRow
 }

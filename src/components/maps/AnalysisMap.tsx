@@ -51,6 +51,13 @@ function classColor(cls: string | null): string | null {
   return null
 }
 
+/** Farbe einer Straße mit Daten. Klasse E umfasst auch Straßen mit genau
+ *  einer Bestellung: die sind schwach (rot), nicht „ohne Bestellung“ (grau). */
+function entryColor(e: StreetAnalyticsEntry): string {
+  if (e.street_class === 'E' && e.order_count > 0) return '#e63027'
+  return classColor(e.street_class) || '#555'
+}
+
 // Straßenfarbe je highway-Typ (identisch mit Vorschaukarte)
 function streetColor(highway: string): string {
   if (highway === 'motorway' || highway === 'motorway_link') return '#f97316'
@@ -135,19 +142,23 @@ export function AnalysisMap({
       }).addTo(map)
 
       // street_analytics laden (wenn plz + showStreetLayer aktiv)
+      // Lokale Variable statt React-State: Die Farben werden weiter unten in
+      // derselben Funktion gesetzt. Der State wäre dort noch leer (alter Wert),
+      // die Straßen blieben dann ungefärbt.
+      const streetLookup = new Map<string, StreetAnalyticsEntry>()
       if (plz && showStreetLayer) {
         try {
           const saRes = await fetch(`/api/analysis/streets?plz=${plz}`)
           if (saRes.ok) {
             const saData = await saRes.json()
-            const lookup = new Map<string, StreetAnalyticsEntry>()
+            const lookup = streetLookup
             for (const s of (saData.streets || []) as StreetAnalyticsEntry[]) {
               lookup.set(normalizeForLookup(s.street_name), s)
               // Ältere Analysen speicherten den Namen mit Hausnummer
               const legacyKey = normalizeStreetName(s.street_name)
               if (!lookup.has(legacyKey)) lookup.set(legacyKey, s)
             }
-            setStreetAnalytics(lookup)
+            setStreetAnalytics(new Map(lookup))
           }
         } catch {
           // street_analytics-Fehler still ignorieren – Karte bleibt nutzbar
@@ -189,7 +200,15 @@ export function AnalysisMap({
         } catch {}
       }
 
-      // ── GeoJSON-Straßen und PLZ-Grenzen (Köln Live-Test) ──────────────
+      // Eine Straße der Karte gehört nur dann zu den Daten, wenn auch die PLZ
+      // passt. Sonst würde z. B. jede „Hauptstraße“ der Karte gefärbt.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const entryFor = (props: any): StreetAnalyticsEntry | undefined => {
+        if (plz && props.plz && props.plz !== plz) return undefined
+        return streetLookup.get(normalizeForLookup(props.name || ''))
+      }
+
+      // ── GeoJSON-Straßen und PLZ-Grenzen (derzeit nur Köln) ────────────
       if (showStreetLayer || showPlzBoundaries) {
         try {
           const geoRes = await fetch('/data/koeln_streets.geojson')
@@ -215,16 +234,13 @@ export function AnalysisMap({
                 const status = feature.properties?.status
                 if (t === 'MultiLineString' || t === 'LineString') {
                   // Straße in street_analytics? → Klassen-Farbe verwenden
-                  const name = feature.properties?.name || ''
-                  const analyticsEntry = streetAnalytics.get(normalizeForLookup(name))
-                  const color = (analyticsEntry && classColor(analyticsEntry.street_class))
-                    || streetColor(feature.properties?.highway || '')
-                  const hasAnalytics = !!analyticsEntry
-                  return {
-                    color,
-                    weight: hasAnalytics ? 2.5 : 1.5,
-                    opacity: hasAnalytics ? 1 : 0.75,
+                  const analyticsEntry = entryFor(feature.properties || {})
+                  if (!analyticsEntry) {
+                    // Keine Daten: dünn und gestrichelt, damit es nicht wie
+                    // „schwach“ oder „ohne Bestellung“ aussieht
+                    return { color: streetColor(feature.properties?.highway || feature.properties?.hw || ''), weight: 1, opacity: 0.45, dashArray: '2 4' }
                   }
+                  return { color: entryColor(analyticsEntry), weight: 2.5, opacity: 1 }
                 }
                 // PLZ-Grenzen
                 if (status === 'incomplete') {
@@ -239,20 +255,21 @@ export function AnalysisMap({
                 if (t === 'MultiLineString' || t === 'LineString') {
                   // Straße anklicken → Popup
                   const name = p.name || '(unbenannt)'
-                  const hw   = p.highway || '—'
+                  const hw   = p.highway || p.hw || '—'
                   const plzVal = p.plz || '—'
 
                   // street_analytics-Daten für diese Straße suchen
-                  const analyticsEntry = streetAnalytics.get(normalizeForLookup(name))
+                  const analyticsEntry = entryFor(p)
 
                   let popupContent: string
                   if (analyticsEntry) {
                     const classLabel: Record<string, string> = {
                       A: 'A – Sehr stark', B: 'B – Stark',
-                      C: 'C – Mittel', D: 'D – Schwach', E: 'E – Kein Kontakt',
+                      C: 'C – Mittel', D: 'D – Schwach',
+                      E: analyticsEntry.order_count > 0 ? 'E – Sehr schwach' : 'E – Ohne Bestellung',
                     }
                     const cls = analyticsEntry.street_class || '—'
-                    const clsColor = classColor(cls) || '#555'
+                    const clsColor = entryColor(analyticsEntry)
                     const revenue = analyticsEntry.revenue.toLocaleString('de-DE', {
                       minimumFractionDigits: 2, maximumFractionDigits: 2
                     })
@@ -278,7 +295,8 @@ export function AnalysisMap({
                     popupContent =
                       `<b style="color:#111">${name}</b><br>` +
                       `<span style="color:#555">PLZ: ${plzVal}</span><br>` +
-                      `<span style="color:#555">Typ: ${hw}</span>`
+                      `<span style="color:#555">Typ: ${hw}</span><br>` +
+                      `<span style="color:#555">Keine Analysedaten für diese Straße</span>`
                   }
 
                   layer.bindPopup(popupContent, { maxWidth: 260 })
@@ -331,7 +349,9 @@ export function AnalysisMap({
         mapInstanceRef.current = null
       }
     }
-  }, [])
+    // Neu aufbauen, wenn eine andere PLZ gewählt wird
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plz])
 
   return (
     <div className="relative w-full h-full min-h-[500px] rounded-xl overflow-hidden border border-[#1f2d45]">
@@ -355,8 +375,8 @@ export function AnalysisMap({
         {[
           { color: '#00d084', label: 'Stark (A/B)' },
           { color: '#f5a623', label: 'Mittel (C)' },
-          { color: '#e63027', label: 'Schwach (D)' },
-          { color: '#4a5a70', label: 'Kein Kontakt (E)' },
+          { color: '#e63027', label: 'Schwach (D, E mit 1 Bestellung)' },
+          { color: '#4a5a70', label: 'Ohne Bestellung (E)' },
           { color: '#7c6dfa', label: 'Wettbewerber' },
           { color: '#2e86c1', label: 'B2B-Potenzial' },
         ].map(item => (
@@ -368,7 +388,7 @@ export function AnalysisMap({
         {showStreetLayer && streetAnalytics.size > 0 && (
           <div className="border-t border-[#1f2d45] mt-2 pt-2">
             <div className="text-[#8a9bb5]">{streetAnalytics.size} Straßen mit Daten</div>
-            <div className="text-[#4a5a70] text-[10px] mt-0.5">Grau = keine Analysedaten</div>
+            <div className="text-[#4a5a70] text-[10px] mt-0.5">Dünn gestrichelt = keine Daten (nicht „schwach“)</div>
           </div>
         )}
         {(showStreetLayer || showPlzBoundaries) && (

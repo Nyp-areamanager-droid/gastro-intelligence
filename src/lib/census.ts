@@ -54,24 +54,15 @@ export const CENSUS: Record<string, number> = {
   '45134':19800,'45136':21200,'45138':18600,'45139':14200,
 }
 
-// Regionale Schätzwerte als Fallback für unbekannte PLZs
-const REGION_ESTIMATE: Record<string, number> = {
-  '50': 20000, '51': 19000, '52': 21000, '53': 22000,
-  '40': 22000, '41': 20000, '42': 19000, '44': 21000, '45': 20000,
-  '10': 24000, '20': 19000, '30': 18000, '60': 18000, '70': 16000,
-  '80': 21000, '90': 14000,
-}
 
+/**
+ * Einwohnerzahl einer PLZ aus der hinterlegten Tabelle.
+ * Unbekannte PLZ liefern null. Früher kam hier ein pauschaler Schätzwert je
+ * PLZ-Bereich zurück (z. B. 20.000), der wie eine echte Zahl angezeigt und in
+ * Marktdurchdringung und Potenzial eingerechnet wurde. Unbekannt bleibt jetzt
+ * unbekannt; die Oberfläche zeigt „—“.
+ */
 export function getPopulation(plz: string): number | null {
   if (!plz) return null
-  if (CENSUS[plz]) return CENSUS[plz]
-  // Fallback: regionaler Schätzwert (Zensus 2022 Durchschnitt für PLZ-Bereich)
-  const prefix2 = plz.substring(0, 2)
-  if (REGION_ESTIMATE[prefix2]) return REGION_ESTIMATE[prefix2]
-  const prefix1 = plz.substring(0, 1)
-  const defaultsByPrefix: Record<string, number> = {
-    '0':18000,'1':24000,'2':19000,'3':15000,'4':22000,
-    '5':20000,'6':18000,'7':16000,'8':21000,'9':14000,
-  }
-  return defaultsByPrefix[prefix1] || 18000
+  return CENSUS[plz] ?? null
 }

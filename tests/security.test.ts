@@ -25,7 +25,7 @@ function makeQueryClient(resolver: (call: Call) => { data: unknown; error: unkno
       const call: Call = { table, ops: [] }
       calls.push(call)
       const builder: Record<string, unknown> = {}
-      for (const op of ['select', 'eq', 'gt', 'in', 'insert', 'update', 'delete', 'upsert', 'order', 'limit']) {
+      for (const op of ['select', 'eq', 'neq', 'is', 'gt', 'in', 'insert', 'update', 'delete', 'upsert', 'order', 'limit', 'range']) {
         builder[op] = (...args: unknown[]) => { call.ops.push([op, args]); return builder }
       }
       const finish = () => Promise.resolve(resolver(call))
@@ -253,7 +253,10 @@ describe('POST /api/upload – Mandantentrennung', () => {
     await POST(uploadRequest({ user_id: 'jemand-anderes' }) as any)
     expect(state.authClient!.storageUploads).toHaveLength(1)
     expect(state.authClient!.storageUploads[0]).toMatch(/^A\/\d+_kunden\.csv$/)
-    const uploadInsert = state.authClient!.calls.find(c => c.table === 'uploads')!
+    // Erst wird geprüft, ob es schon Uploads gibt (Lesen), dann angelegt
+    const uploadInsert = state.authClient!.calls.find(c => c.table === 'uploads' && c.ops.some(([op]) => op === 'insert'))!
+    const uploadCheck = state.authClient!.calls.find(c => c.table === 'uploads' && c.ops.some(([op]) => op === 'select') && !c.ops.some(([op]) => op === 'insert'))!
+    expect(uploadCheck.ops).toContainEqual(['eq', ['company_id', 'A']])
     const inserted = uploadInsert.ops.find(([op]) => op === 'insert')![1][0] as Record<string, unknown>
     expect(inserted.company_id).toBe('A')
     expect(inserted.uploaded_by).toBe('u1')

@@ -377,7 +377,7 @@ function makeServiceClient() {
       const call: Call = { table, ops: [] }
       db.calls.push(call)
       const b: Record<string, unknown> = {}
-      for (const op of ['select', 'eq', 'insert', 'update', 'delete', 'upsert', 'order', 'limit', 'range']) {
+      for (const op of ['select', 'eq', 'neq', 'is', 'in', 'insert', 'update', 'delete', 'upsert', 'order', 'limit', 'range']) {
         b[op] = (...args: unknown[]) => { call.ops.push([op, args]); return b }
       }
       const result = () => {

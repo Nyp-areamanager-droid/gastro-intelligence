@@ -30,18 +30,24 @@ export function extractHouseNumber(raw: string): { street: string; houseNumber: 
 }
 
 export function normalizeCity(raw: string): string {
-  const lower = raw.toLowerCase().trim()
+  const trimmed = raw.trim().replace(/\s+/g, ' ')
+  const lower = trimmed.toLowerCase()
+  // Nur ganze Schreibvarianten ersetzen, keine Teilwörter: „Frankfurt (Oder)“
+  // darf nicht zu „Frankfurt am Main“ werden, „Neukölln“ nicht zu „Köln“.
   const mappings: Record<string, string> = {
-    cologne: 'Köln', keln: 'Köln', koeln: 'Köln',
-    muenchen: 'München', munich: 'München',
-    frankfurt: 'Frankfurt am Main',
-    duesseldorf: 'Düsseldorf',
-    nuernberg: 'Nürnberg',
+    cologne: 'Köln', keln: 'Köln', koeln: 'Köln', 'köln': 'Köln',
+    muenchen: 'München', munich: 'München', 'münchen': 'München',
+    duesseldorf: 'Düsseldorf', 'düsseldorf': 'Düsseldorf',
+    nuernberg: 'Nürnberg', 'nürnberg': 'Nürnberg',
   }
-  for (const [key, val] of Object.entries(mappings)) {
-    if (lower.includes(key)) return val
-  }
-  return raw.trim().replace(/\b\w/g, c => c.toUpperCase())
+  if (mappings[lower]) return mappings[lower]
+  // Schreibweise der Datei beibehalten, nur komplett klein oder komplett groß
+  // geschriebene Namen anpassen. \b\w versagt bei Umlauten („KöLn“).
+  if (trimmed !== lower && trimmed !== trimmed.toUpperCase()) return trimmed
+  const small = new Set(['am', 'an', 'der', 'die', 'dem', 'den', 'im', 'in', 'ob', 'bei', 'vor', 'unter', 'auf', 'zu'])
+  return lower.split(/(\s|-|\(|\/)/).map((part, i) =>
+    (i > 0 && small.has(part)) ? part : part.charAt(0).toLocaleUpperCase('de-DE') + part.slice(1)
+  ).join('')
 }
 
 export function validatePLZ(plz: string): boolean {
@@ -742,10 +748,12 @@ export function generateRecommendations(
   })
 
   // 5. Straßen-spezifische Aktionen
-  const missedStreets = streetResults.filter(s => s.street_class === 'E' && s.is_in_official_list).slice(0, 5)
+  // Nur Straßen aus einem VOLLSTÄNDIGEN Verzeichnis ohne jede Bestellung.
+  // Klasse E allein reicht nicht: Sie umfasst auch Straßen mit 1 Bestellung.
+  const missedStreets = streetResults.filter(s => s.street_class === 'E' && s.order_count === 0 && s.is_in_official_list === true).slice(0, 5)
   if (missedStreets.length > 0) {
     recs.push({
-      action_type: 'flyer', title: `Flyer: ${missedStreets.length} unerreichte Top-Straßen`,
+      action_type: 'flyer', title: `Flyer: ${missedStreets.length} Straßen ohne Bestellung`,
       description: missedStreets.map(s => s.street_name).join(', '),
       target: 'Straßen ohne einzigen Kontakt',
       estimated_cost: Math.round(missedStreets.length * 45),

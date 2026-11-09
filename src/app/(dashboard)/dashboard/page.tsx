@@ -3,10 +3,11 @@
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { computeDashboardKPIs, generateRecommendations } from '@/lib/analysis/engine'
-import type { DashboardKPIs, Alert, MarketingRecommendation, PLZAnalysisResult } from '@/types'
+import type { DashboardKPIs, Alert, MarketingRecommendation, PLZAnalysisResult, ParsedCustomerRow } from '@/types'
 import Link from 'next/link'
 import { getPopulation } from '@/lib/census'
 import { fetchAllRows } from '@/lib/supabase/fetch-all'
+import { mergeCustomers } from '@/lib/analysis/merge-customers'
 
 const actionColors: Record<string, string> = { sms: '#e63027', flyer: '#f5a623', b2b_visit: '#00d084', loyalty: '#2e86c1', reactivation: '#ff6b4a', coupon: '#7c6dfa' }
 
@@ -39,12 +40,15 @@ export default function DashboardPage() {
         if (fresh) analytics = fresh
       }
       if (customers?.length) {
-        const rows = customers.map(c => ({
+        // Dieselbe Person aus mehreren Zeiträumen (ergänzte Uploads) zählt als ein Kunde
+        const rows = mergeCustomers(customers.map(c => ({
+          phone_normalized: c.phone_normalized || undefined, full_name: c.full_name || undefined,
+          house_number: c.house_number || undefined,
           postal_code: c.postal_code, street: c.street, street_normalized: c.street_normalized,
           city: c.city, total_orders: c.total_orders, total_revenue: c.total_revenue,
           avg_order_value: c.avg_order_value, last_order_date: c.last_order_date,
           is_vip: c.is_vip, rfm_segment: c.rfm_segment, late_deliveries: c.late_deliveries || 0, _row_index: 0, _errors: [],
-        }))
+        })) as ParsedCustomerRow[])
         const computed = computeDashboardKPIs(rows)
         setKpis({ ...computed, critical_alerts: dbAlerts?.filter(a => a.severity === 'critical').length || 0 })
         // Deduplizieren nach postal_code (neueste Einträge behalten)

@@ -17,6 +17,10 @@ interface StreetRow {
   streetClass: string
 }
 
+// PLZ, für die die eingebaute Straßenkarte (public/data/koeln_streets.geojson)
+// Straßenlinien enthält. Derzeit nur Köln; andere Orte haben noch keine Karte.
+const MAP_STREET_PLZ = new Set<string>(["50668", "50670", "50674", "50676", "50678", "50679", "50733", "50735", "50737", "50739", "50769", "50823", "50825", "50827", "50829", "50858", "50859", "50931", "50933", "50935", "51061", "51063", "51065", "51069", "51107", "51109", "51143", "51147"])
+
 export default function StreetsPage() {
   const [plzList, setPlzList] = useState<string[]>([])
   const [selectedPLZ, setSelectedPLZ] = useState('')
@@ -133,6 +137,12 @@ export default function StreetsPage() {
         <div role="status" style={{ background:'rgba(245,166,35,0.08)', border:'1px solid rgba(245,166,35,0.4)', borderRadius:'10px', padding:'12px 16px', marginBottom:'24px', fontSize:'13px', color:'#f5c26b' }}>
           Straßenverzeichnis für diese PLZ fehlt oder ist unvollständig. Angezeigt werden nur Straßen mit Bestellungen. Straßen ohne Bestellungen werden erst ausgewiesen, wenn die vollständige Liste vorliegt.
           {directory.message ? <div style={{ marginTop:'4px', fontSize:'12px', color:'#8a9bb5' }}>{directory.message}</div> : null}
+        </div>
+      )}
+
+      {selectedPLZ && !MAP_STREET_PLZ.has(selectedPLZ) && (
+        <div role="status" style={{ background:'rgba(138,155,181,0.08)', border:'1px solid #1f2d45', borderRadius:'10px', padding:'12px 16px', marginBottom:'12px', fontSize:'13px', color:'#8a9bb5' }}>
+          Für PLZ {selectedPLZ} liegt noch keine Straßenkarte vor. Die Karte zeigt deshalb keine Straßenfarben. Die Tabelle unten ist davon nicht betroffen.
         </div>
       )}
 
