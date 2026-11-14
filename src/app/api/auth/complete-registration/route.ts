@@ -23,7 +23,7 @@ import { validateCompanyName, buildCompanySlug } from '@/lib/auth/registration'
  *   gesetzt hat. Er betrifft nur seine eigene neue Firma.
  */
 export async function POST() {
-  const supabase = createServerSupabaseClient()
+  const supabase = await createServerSupabaseClient()
   const { data: authData, error: authError } = await supabase.auth.getUser()
   const user = authData?.user
   if (authError || !user) {

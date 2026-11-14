@@ -180,6 +180,7 @@ export type Database = {
           period_end: string | null
           file_hash: string | null
           import_mode: string | null
+          geo_summary: Json | null
           created_at: string
         }
         Insert: {
@@ -200,6 +201,7 @@ export type Database = {
           period_end?: string | null
           file_hash?: string | null
           import_mode?: string | null
+          geo_summary?: Json | null
           created_at?: string
         }
         Update: {
@@ -220,6 +222,7 @@ export type Database = {
           period_end?: string | null
           file_hash?: string | null
           import_mode?: string | null
+          geo_summary?: Json | null
           created_at?: string
         }
         Relationships: [
@@ -234,6 +237,7 @@ export type Database = {
           upload_id: string | null
           phone_normalized: string | null
           customer_ref: string | null
+          geo_status: string | null
           phone_raw: string | null
           first_name: string | null
           last_name: string | null
@@ -273,6 +277,7 @@ export type Database = {
           upload_id?: string | null
           phone_normalized?: string | null
           customer_ref?: string | null
+          geo_status?: string | null
           phone_raw?: string | null
           first_name?: string | null
           last_name?: string | null
@@ -312,6 +317,7 @@ export type Database = {
           upload_id?: string | null
           phone_normalized?: string | null
           customer_ref?: string | null
+          geo_status?: string | null
           phone_raw?: string | null
           first_name?: string | null
           last_name?: string | null
@@ -372,6 +378,10 @@ export type Database = {
           population_source: Database['public']['Enums']['data_source'] | null
           population_year: number | null
           population_method: string | null
+          ags: string | null
+          population_quality: string | null
+          households_quality: string | null
+          reference_version: string | null
           population_reference_date: string | null
           last_fetched_at: string | null
           needs_refresh: boolean
@@ -401,6 +411,10 @@ export type Database = {
           population_source?: Database['public']['Enums']['data_source'] | null
           population_year?: number | null
           population_method?: string | null
+          ags?: string | null
+          population_quality?: string | null
+          households_quality?: string | null
+          reference_version?: string | null
           population_reference_date?: string | null
           last_fetched_at?: string | null
           needs_refresh?: boolean
@@ -430,12 +444,28 @@ export type Database = {
           population_source?: Database['public']['Enums']['data_source'] | null
           population_year?: number | null
           population_method?: string | null
+          ags?: string | null
+          population_quality?: string | null
+          households_quality?: string | null
+          reference_version?: string | null
           population_reference_date?: string | null
           last_fetched_at?: string | null
           needs_refresh?: boolean
           created_at?: string
           updated_at?: string
         }
+        Relationships: []
+      }
+      street_directory: {
+        Row: { postal_code: string; streets: string[]; street_count: number; version: string }
+        Insert: { postal_code: string; streets: string[]; street_count: number; version: string }
+        Update: { postal_code?: string; streets?: string[]; street_count?: number; version?: string }
+        Relationships: []
+      }
+      plz_localities: {
+        Row: { postal_code: string; locality: string; locality_key: string; kind: string }
+        Insert: { postal_code: string; locality: string; locality_key: string; kind: string }
+        Update: { postal_code?: string; locality?: string; locality_key?: string; kind?: string }
         Relationships: []
       }
       streets: {

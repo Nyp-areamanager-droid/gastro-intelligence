@@ -126,5 +126,6 @@ export function rateStreets(params: {
   return { basis, plz_average: R, total_orders: totalOrders, ratings, summary }
 }
 
-export const RATING_COLORS: Record<Rating, string> = { green: '#00d084', orange: '#f5a623', red: '#e63027', none: '#64748b' }
+// dieselben Werte wie --map-* in src/app/globals.css
+export const RATING_COLORS: Record<Rating, string> = { green: '#1E9E61', orange: '#E08A1E', red: '#D0392D', none: '#8A94A3' }
 export const RATING_LABELS: Record<Rating, string> = { green: 'Grün', orange: 'Orange', red: 'Rot', none: 'Nicht bewertbar' }

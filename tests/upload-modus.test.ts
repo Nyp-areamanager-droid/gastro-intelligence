@@ -62,7 +62,7 @@ function req(mode?: string, extra: Record<string, string> = {}) {
   if (mode) fd.append('mode', mode)
   for (const [k, v] of Object.entries(extra)) fd.append(k, v)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return { formData: async () => fd } as any
+  return { headers: new Headers(), formData: async () => fd } as any
 }
 const old = (p: Record<string, unknown> = {}) => ({ id: 'alt', filename: 'oktober.xlsx', created_at: '2026-11-01T09:00:00Z', file_hash: 'anders', period_start: '2026-10-01', period_end: '2026-10-31', ...p })
 const writes = (table: string) => state.calls.filter(c => c.table === table && c.ops.some(([o]) => ['insert', 'delete', 'update', 'upsert'].includes(o)))

@@ -1,152 +1,102 @@
 'use client'
-import { useEffect, useState } from 'react'
-import { createClient } from '@/lib/supabase/client'
-import { verifiedPopulation, POPULATION_SOURCE_TEXT, MISSING_POPULATION_TEXT } from '@/lib/geo/population'
+// Postleitzahlen: alle Liefergebiete im Vergleich, mit belegten Einwohnerzahlen.
+import Link from 'next/link'
+import { Card, EmptyState, InfoTip, LoadError, Notice, PageHeader, PageSkeleton, Stat, fmtEur, fmtInt, fmtNum, fmtPct } from '@/components/ui'
+import { useOverview } from '@/lib/insights/use-overview'
+import { HOUSEHOLDS_NOTE_TEXT, LIMITED_POPULATION_TEXT, POPULATION_SOURCE_TEXT, isLimitedPopulation } from '@/lib/geo/population'
 
 export default function PlzPage() {
-  const [data, setData] = useState<any[]>([])
-  const [loading, setLoading] = useState(true)
-  const supabase = createClient()
-
-  useEffect(() => {
-    async function load() {
-      const { data: { user } } = await supabase.auth.getUser()
-      if (!user) return
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { data: m } = await (supabase.from('company_users') as any).select('company_id').eq('user_id', user.id).single()
-      if (!m) return
-      const { data: rows } = await supabase.from('analytics').select('*').eq('company_id', m.company_id).order('revenue', { ascending: false })
-
-      // Deduplizieren nach PLZ
-      const seen = new Map<string, any>()
-      for (const r of (rows || [])) {
-        if (!seen.has(r.postal_code)) seen.set(r.postal_code, r)
-      }
-      // Einwohner und Haushalte nur aus belegter Quelle (Zensus-Import)
-      const plzList = Array.from(seen.keys())
-      const { data: refs } = plzList.length
-        ? await supabase.from('postal_codes').select('postal_code, population, households, population_method, population_reference_date').in('postal_code', plzList)
-        : { data: [] as any[] }
-      const refByPlz = new Map((refs || []).map((x: any) => [x.postal_code, verifiedPopulation(x)]))
-      const deduped = Array.from(seen.values()).map(r => {
-        const v = refByPlz.get(r.postal_code)
-        const pop = v?.population ?? null
-        const customers = r.customer_count || 0
-        const penetration = pop ? Math.round(customers / pop * 10000) / 100 : null
-        const notReached = pop ? Math.max(0, pop - customers) : null
-        return { ...r, _pop: pop, _households: v?.households ?? null, _penetration: penetration, _notReached: notReached }
-      })
-      setData(deduped)
-      setLoading(false)
-    }
-    load()
-  }, [])
-
-  const th: React.CSSProperties = { textAlign: 'right', fontSize: '11px', color: '#4a5a70', paddingBottom: '12px', borderBottom: '1px solid #1f2d45', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', padding: '0 8px 12px', whiteSpace: 'nowrap' }
-  const thL: React.CSSProperties = { ...th, textAlign: 'left' }
-  const td: React.CSSProperties = { textAlign: 'right', padding: '11px 8px', borderBottom: '1px solid rgba(31,45,69,0.4)', fontSize: '13px' }
-  const tdL: React.CSSProperties = { ...td, textAlign: 'left', color: '#e63027', fontWeight: 700, fontFamily: 'monospace' }
-
-  if (loading) return (
-    <div style={{ display:'flex', alignItems:'center', justifyContent:'center', height:'100%' }}>
-      <div style={{ width:'36px', height:'36px', border:'3px solid #e63027', borderTopColor:'transparent', borderRadius:'50%', animation:'spin 0.8s linear infinite' }} />
-      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
-    </div>
+  const { data, error, loading, reload } = useOverview()
+  if (loading && !data) return <PageSkeleton />
+  if (error || !data) return <LoadError message={error || 'Keine Antwort'} onRetry={reload} />
+  const o = data.overview
+  if (o.empty) return (
+    <div className="page"><PageHeader title="Postleitzahlen" />
+      <EmptyState title="Noch keine Liefergebiete" action={{ href: '/uploads', label: 'Datei importieren' }}>Nach dem ersten Import sehen Sie hier jede Postleitzahl mit Umsatz, Bestellungen und – wo belegt – Einwohnern.</EmptyState></div>
   )
-
-  const withPop = data.filter(r => r._pop)
-  const totalPop = withPop.reduce((s,r) => s + (r._pop || 0), 0)
-  const totalCustomers = data.reduce((s,r) => s + (r.customer_count || 0), 0)
-  // Nur PLZ mit belegter Einwohnerzahl, sonst würden Kunden ohne Gegenstück gezählt
-  const totalNotReached = withPop.reduce((s,r) => s + (r._notReached || 0), 0)
-  const avgPct = data.filter(r => r._penetration).length
-    ? data.filter(r => r._penetration).reduce((s,r) => s + r._penetration, 0) / data.filter(r => r._penetration).length
-    : null
+  const withPop = o.plz.filter(p => p.population !== null)
+  const pop = withPop.reduce((s, p) => s + p.population!, 0), ordersWithPop = withPop.reduce((s, p) => s + p.orders, 0), customersWithPop = withPop.reduce((s, p) => s + p.customers, 0)
+  const maxRate = Math.max(0, ...o.plz.map(p => p.orders_per_1000 ?? 0))
 
   return (
-    <div style={{ padding:'28px 32px', maxWidth:'1300px', margin:'0 auto' }}>
-      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
-      <h1 style={{ fontSize:'24px', fontWeight:700, color:'#fff', margin:'0 0 4px' }}>PLZ & Einwohner</h1>
-      <p style={{ fontSize:'13px', color:'#8a9bb5', marginBottom:'28px' }}>Wie viel % der Einwohner bestellen bei euch?</p>
+    <div className="page">
+      <PageHeader title="Postleitzahlen" lead="Ihre Liefergebiete im Vergleich. Gemessen an der Einwohnerzahl zeigt sich, wo Sie stark sind und wo noch viele Haushalte nicht bestellen." />
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <Stat label="Liefergebiete" value={fmtInt(o.plz.length)} sub="Postleitzahlen mit Bestellungen" />
+        <Stat label="Einwohner in diesen Gebieten" value={withPop.length ? fmtInt(pop) : '—'} sub={`belegt für ${withPop.length} von ${o.plz.length} Postleitzahlen`} help={POPULATION_SOURCE_TEXT} />
+        <Stat label="Bestellungen je 1.000 Einwohner" value={pop ? fmtNum(ordersWithPop / pop * 1000) : '—'} sub={o.coverage.days ? `im Datenzeitraum von ${fmtInt(o.coverage.days)} Tagen` : 'im gesamten Datenzeitraum'}
+          help="Nur über die Postleitzahlen mit belegter Einwohnerzahl gerechnet: Bestellungen dieser Gebiete geteilt durch ihre Einwohner, mal 1.000." />
+        <Stat label="Kunden je 100 Einwohner" value={pop ? fmtNum(customersWithPop / pop * 100, 2) : '—'} sub="nur Gebiete mit belegter Einwohnerzahl"
+          help="Kunden geteilt durch Einwohner, mal 100. Ein Kunde ist oft ein Haushalt mit mehreren Personen – der Wert ist deshalb eine Untergrenze dafür, wie viele Menschen Sie erreichen." />
+      </div>
 
-      {data.length === 0 ? (
-        <div style={{ textAlign:'center', padding:'64px', color:'#4a5a70' }}>Noch keine Daten — bitte zuerst eine Datei hochladen.</div>
-      ) : (<>
-        {/* KPI Cards */}
-        <div style={{ display:'grid', gridTemplateColumns:'repeat(5,1fr)', gap:'16px', marginBottom:'28px' }}>
-          {[
-            { label:'📍 PLZ-Gebiete', value: data.length, color:'#2e86c1' },
-            { label:'👥 Kunden', value: totalCustomers.toLocaleString('de-DE'), color:'#00d084' },
-            { label:`🏘️ Einwohner (${withPop.length} von ${data.length} PLZ belegt)`, value: totalPop > 0 ? totalPop.toLocaleString('de-DE') : '—', color:'#f5a623' },
-            { label:'📊 Ø Marktanteil', value: avgPct ? avgPct.toFixed(2)+'%' : '—', color:'#2e86c1' },
-            { label:'🔴 Nicht erreicht', value: totalNotReached > 0 ? totalNotReached.toLocaleString('de-DE') : '—', color:'#f87171' },
-          ].map((k,i) => (
-            <div key={i} style={{ background:'#111827', border:'1px solid #1f2d45', borderTop:`3px solid ${k.color}`, borderRadius:'12px', padding:'20px' }}>
-              <div style={{ fontSize:'10px', color:'#8a9bb5', textTransform:'uppercase', letterSpacing:'0.8px', marginBottom:'8px' }}>{k.label}</div>
-              <div style={{ fontSize:'26px', fontWeight:700, color:k.color, fontFamily:'monospace' }}>{k.value}</div>
-            </div>
-          ))}
-        </div>
+      {withPop.length < o.plz.length && (
+        <div className="mt-3"><Notice title={`Für ${o.plz.length - withPop.length} Postleitzahlen fehlt eine belegte Einwohnerzahl`}>
+          Einwohner und Haushalte werden nur aus dem Zensus 2022 übernommen, nie geschätzt. Für Gebiete ohne Zahl bleiben die Spalten leer. Der Zensus-Import wird einmalig vom Betreiber der Plattform eingespielt.
+        </Notice></div>
+      )}
 
-        {/* Tabelle */}
-        <div style={{ background:'#111827', border:'1px solid #1f2d45', borderRadius:'12px', padding:'24px', overflowX:'auto' }}>
-          <div style={{ fontSize:'11px', color:'#8a9bb5', textTransform:'uppercase', letterSpacing:'0.8px', marginBottom:'20px', fontWeight:600 }}>
-            🗺️ Detailübersicht je PLZ
-          </div>
-          <table style={{ width:'100%', borderCollapse:'collapse' }}>
-            <thead>
-              <tr>
-                <th style={thL}>PLZ</th>
-                <th style={th}>Kunden</th>
-                <th style={th}>Bestellungen</th>
-                <th style={th}>Umsatz</th>
-                <th style={th}>Einwohner</th>
-                <th style={th}>Haushalte</th>
-                <th style={th}>Bestellen bei uns %</th>
-                <th style={th}>Nicht erreicht</th>
-                <th style={th}>Straßen</th>
-              </tr>
-            </thead>
+      <Card className="mt-4" pad={false} title="Alle Postleitzahlen" lead="Sortiert nach Umsatz. Ein Klick auf die Postleitzahl öffnet die Karte.">
+        <div className="table-wrap">
+          <table className="table">
+            <thead><tr>
+              <th>PLZ</th><th className="r">Umsatz</th><th className="r">Bestellungen</th><th className="r">Bestellwert</th><th className="r">Kunden</th><th className="r">Einwohner</th><th className="r">Haushalte</th>
+              <th>Bestellungen je 1.000 Einwohner</th>
+              <th className="r">je 30 Tage<InfoTip label="je 30 Tage">Bestellungen je 1.000 Einwohner, umgerechnet auf 30 Tage. So bleibt der Wert vergleichbar, wenn später weitere Zeiträume dazukommen.</InfoTip></th>
+              <th className="r">Kunden je 100 Einw.</th><th className="r">Straßen mit Bestellung</th>
+            </tr></thead>
             <tbody>
-              {data.map((r,i) => {
-                const pct = r._penetration
-                // Keine Farbe: Was ein guter Marktanteil ist, hängt von der Branche ab
-                const pctColor = '#c8d3e6'
-                return (
-                  <tr key={i}>
-                    <td style={tdL}>{r.postal_code || '—'}</td>
-                    <td style={{ ...td, fontFamily:'monospace' }}>{(r.customer_count||0).toLocaleString('de-DE')}</td>
-                    <td style={{ ...td, fontFamily:'monospace' }}>{(r.order_count||0).toLocaleString('de-DE')}</td>
-                    <td style={{ ...td, fontFamily:'monospace' }}>{r.revenue ? `${Number(r.revenue).toFixed(0)} €` : '—'}</td>
-                    <td style={{ ...td, color:'#f5a623', fontFamily:'monospace' }}>
-                      {r._pop ? r._pop.toLocaleString('de-DE') : <span title={MISSING_POPULATION_TEXT} style={{color:'#4a5a70',fontSize:'11px'}}>— keine Quelle</span>}
-                    </td>
-                    <td style={{ ...td, color:'#f5a623', fontFamily:'monospace' }}>
-                      {r._households ? r._households.toLocaleString('de-DE') : <span style={{color:'#4a5a70',fontSize:'11px'}}>—</span>}
-                    </td>
-                    <td style={{ ...td, fontFamily:'monospace' }}>
-                      {pct !== null
-                        ? <span style={{ color:pctColor, fontWeight:700 }}>{pct.toFixed(2)}%</span>
-                        : <span style={{color:'#4a5a70',fontSize:'11px'}}>—</span>}
-                    </td>
-                    <td style={{ ...td, color:'#f87171', fontFamily:'monospace' }}>
-                      {r._notReached !== null ? r._notReached.toLocaleString('de-DE') : '—'}
-                    </td>
-                    <td style={{ ...td, color:'#8a9bb5' }}>
-                      {r.streets_with_orders || r.streets_total
-                        ? `${r.streets_with_orders||0}/${r.streets_total||0}`
-                        : '—'}
-                    </td>
-                  </tr>
-                )
-              })}
+              {o.plz.map(p => (
+                <tr key={p.postal_code}>
+                  <td><Link href={`/streets?plz=${p.postal_code}`} className="link num">{p.postal_code}</Link>{p.city && <span className="ml-2 text-ink-muted">{p.city}</span>}</td>
+                  <td className="r">{fmtEur(p.revenue)} <span className="text-ink-muted">({fmtPct(p.revenue_share_pct, 0)})</span></td>
+                  <td className="r">{fmtInt(p.orders)}</td>
+                  <td className="r">{fmtEur(p.avg_order_value, 2)}</td>
+                  <td className="r">{fmtInt(p.customers)}</td>
+                  <td className="r">{fmtInt(p.population)}{isLimitedPopulation(p.population) && <span className="text-warn" title={LIMITED_POPULATION_TEXT}> *</span>}</td>
+                  <td className="r">{fmtInt(p.households)}</td>
+                  <td>{p.orders_per_1000 === null ? <span className="text-ink-muted">—</span> : (
+                    <div className="flex items-center gap-2"><span className="num w-12 text-right">{fmtNum(p.orders_per_1000)}</span>
+                      <span className="h-2 w-24 overflow-hidden rounded-full bg-sunken" aria-hidden><span className="block h-full rounded-full bg-accent" style={{ width: `${maxRate ? Math.max(3, p.orders_per_1000 / maxRate * 100) : 0}%` }} /></span></div>)}</td>
+                  <td className="r">{fmtNum(p.orders_per_1000_30d)}</td>
+                  <td className="r">{fmtNum(p.customers_per_100, 2)}</td>
+                  <td className="r">{p.streets_total === null ? <span className="text-ink-muted">—</span> : <>{fmtInt(p.streets_with_orders)} <span className="text-ink-muted">von {fmtInt(p.streets_total)}</span></>}</td>
+                </tr>
+              ))}
             </tbody>
           </table>
-          <p style={{ fontSize:'11px', color:'#4a5a70', marginTop:'16px', fontStyle:'italic' }}>
-            Einwohner und Haushalte: {POPULATION_SOURCE_TEXT}. „— keine Quelle“: Für diese PLZ liegt keine belegte Zahl vor; Marktanteil und „nicht erreicht“ werden dann nicht berechnet. Marktanteil = Kunden ÷ Einwohner × 100. Kunden sind Personen, Einwohner ebenfalls; Haushalte sind etwas anderes als Hausadressen.
-          </p>
         </div>
-      </>)}
+        <p className="border-t border-line px-4 py-2.5 text-[12px] text-ink-muted sm:px-5">
+          Einwohner und Haushalte: {POPULATION_SOURCE_TEXT}. „—“ bedeutet: keine belegte Angabe, es wird nichts geschätzt. {HOUSEHOLDS_NOTE_TEXT}
+          {o.plz.some(p => isLimitedPopulation(p.population)) && <> * {LIMITED_POPULATION_TEXT}</>}{' '}
+          Straßen: Straßenverzeichnis aus OpenStreetMap (OpenPLZ-Datensatz, © OpenStreetMap-Mitwirkende, ODbL), nur wenn es für die PLZ vorliegt.
+        </p>
+      </Card>
+
+      {o.nearby && (
+        <Card className="mt-4" pad={false} title="Nachbargebiete ohne Bestellungen"
+          lead={`Postleitzahlen bis ${fmtNum(o.nearby.max_km)} km neben Ihren Liefergebieten mit mindestens 1.000 Einwohnern, aus denen bisher nichts bestellt wurde. Ob Sie dorthin liefern können, entscheiden Sie.`}>
+          {o.nearby.items.length ? (
+            <div className="table-wrap">
+              <table className="table">
+                <thead><tr><th>PLZ</th><th className="r">Einwohner</th><th className="r">Haushalte</th><th className="r">Entfernung</th><th>nächste eigene PLZ</th></tr></thead>
+                <tbody>{o.nearby.items.map(n => (
+                  <tr key={n.postal_code}>
+                    <td><span className="num">{n.postal_code}</span>{n.city && <span className="ml-2 text-ink-muted">{n.city}</span>}</td>
+                    <td className="r">{fmtInt(n.population)}</td>
+                    <td className="r">{fmtInt(n.households)}</td>
+                    <td className="r">{fmtNum(n.distance_km)} km</td>
+                    <td className="num">{n.nearest_own_plz}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+          ) : <p className="px-4 pb-4 text-ink-muted sm:px-5">In der Nähe gibt es keine Postleitzahl mit belegter Einwohnerzahl, aus der noch nicht bestellt wurde.</p>}
+          <p className="border-t border-line px-4 py-2.5 text-[12px] text-ink-muted sm:px-5">
+            Entfernung zwischen den Mittelpunkten der PLZ-Flächen (OpenStreetMap), nicht die Fahrstrecke. Einwohner und Haushalte: Zensus 2022.
+          </p>
+        </Card>
+      )}
     </div>
   )
 }

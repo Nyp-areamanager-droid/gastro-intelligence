@@ -37,7 +37,7 @@ async function fetchWithRetry(url: string, options: RequestInit = {}, retries = 
 }
 
 // =============================================================================
-// OpenPLZ Provider — amtliches Straßenverzeichnis Deutschland
+// OpenPLZ Provider — Straßenverzeichnis Deutschland (aus OpenStreetMap)
 // https://openplzapi.org
 // =============================================================================
 export const openplzProvider = {

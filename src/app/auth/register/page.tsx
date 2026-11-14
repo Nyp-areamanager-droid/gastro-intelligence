@@ -7,13 +7,16 @@ import { createClient } from '@/lib/supabase/client'
 import { validateRegistrationInput } from '@/lib/auth/registration'
 import { completeRegistration } from '@/lib/auth/complete-registration-client'
 
+import { AuthShell, authErrorDE } from '@/components/auth/AuthShell'
+import { Notice } from '@/components/ui'
+
 export default function RegisterPage() {
-  const [step, setStep] = useState<1|2>(1)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [companyName, setCompanyName] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [info, setInfo] = useState('')
   const router = useRouter()
   const supabase = createClient()
 
@@ -39,7 +42,7 @@ export default function RegisterPage() {
       // 2. Ohne Sitzung ist die E-Mail-Bestätigung aktiv. Die Firma wird
       //    dann beim ersten Login angelegt.
       if (!authData.session) {
-        setError('Fast geschafft: Bitte bestätige deine E-Mail-Adresse und melde dich dann an.')
+        setInfo('Fast geschafft: Bitte bestätigen Sie Ihre E-Mail-Adresse über den Link in unserer Nachricht und melden Sie sich dann an.')
         return
       }
 
@@ -49,70 +52,34 @@ export default function RegisterPage() {
 
       router.push('/dashboard')
     } catch (err) {
-      setError(String(err))
+      setError(authErrorDE(err instanceof Error ? err.message : String(err)))
     } finally {
       setLoading(false)
     }
   }
 
   return (
-    <div className="min-h-screen bg-[#07090f] flex items-center justify-center p-4">
-      <div className="w-full max-w-md">
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-14 h-14 rounded-xl bg-brand-red mb-4">
-            <span className="text-white text-xl font-bold font-mono">GI</span>
+    <AuthShell title="Konto anlegen" lead="Für Ihr Unternehmen. Weitere Nutzer können später hinzukommen."
+      footer={<>Schon ein Konto? <Link href="/auth/login" className="link">Anmelden</Link></>}>
+      {info ? <Notice tone="good">{info}</Notice> : (
+        <form onSubmit={handleRegister} className="space-y-4">
+          <div>
+            <label htmlFor="company" className="field-label">Name des Unternehmens</label>
+            <input id="company" type="text" autoComplete="organization" value={companyName} onChange={e => setCompanyName(e.target.value)} className="input" placeholder="Mein Restaurant GmbH" required />
           </div>
-          <h1 className="text-2xl font-bold font-head">Gastro Intelligence</h1>
-          <p className="text-[#8a9bb5] text-sm mt-1">Kostenlosen Account erstellen</p>
-        </div>
-
-        <div className="card">
-          <h2 className="text-lg font-semibold mb-5">Registrieren</h2>
-
-          <form onSubmit={handleRegister} className="space-y-4">
-            <div>
-              <label className="block text-xs text-[#8a9bb5] uppercase tracking-wider mb-1.5">Unternehmensname</label>
-              <input
-                type="text" value={companyName} onChange={e => setCompanyName(e.target.value)}
-                className="input" placeholder="Mein Restaurant GmbH" required
-              />
-            </div>
-            <div>
-              <label className="block text-xs text-[#8a9bb5] uppercase tracking-wider mb-1.5">E-Mail</label>
-              <input
-                type="email" value={email} onChange={e => setEmail(e.target.value)}
-                className="input" placeholder="name@unternehmen.de" required
-              />
-            </div>
-            <div>
-              <label className="block text-xs text-[#8a9bb5] uppercase tracking-wider mb-1.5">Passwort</label>
-              <input
-                type="password" value={password} onChange={e => setPassword(e.target.value)}
-                className="input" placeholder="Mindestens 8 Zeichen" minLength={8} required
-              />
-            </div>
-
-            {error && (
-              <div className="bg-red-500/10 border border-red-500/25 rounded-lg p-3 text-red-400 text-sm">
-                {error}
-              </div>
-            )}
-
-            <button type="submit" disabled={loading} className="btn-primary w-full py-2.5">
-              {loading ? 'Konto wird erstellt...' : 'Kostenlos starten'}
-            </button>
-
-            <p className="text-[10px] text-[#4a5a70] text-center">
-              Mit der Registrierung akzeptieren Sie unsere AGB und Datenschutzrichtlinie. DSGVO-konform.
-            </p>
-          </form>
-
-          <div className="mt-4 pt-4 border-t border-[#1f2d45] text-center text-sm text-[#8a9bb5]">
-            Bereits registriert?{' '}
-            <Link href="/auth/login" className="text-brand-red hover:underline">Anmelden</Link>
+          <div>
+            <label htmlFor="email" className="field-label">E-Mail-Adresse</label>
+            <input id="email" type="email" autoComplete="email" value={email} onChange={e => setEmail(e.target.value)} className="input" placeholder="name@unternehmen.de" required />
           </div>
-        </div>
-      </div>
-    </div>
+          <div>
+            <label htmlFor="password" className="field-label">Passwort</label>
+            <input id="password" type="password" autoComplete="new-password" value={password} onChange={e => setPassword(e.target.value)} className="input" minLength={8} required aria-describedby="pw-help" />
+            <p id="pw-help" className="field-help">Mindestens 8 Zeichen.</p>
+          </div>
+          {error && <Notice tone="bad">{error}</Notice>}
+          <button type="submit" disabled={loading} className="btn-primary h-10 w-full">{loading ? 'Konto wird angelegt …' : 'Konto anlegen'}</button>
+        </form>
+      )}
+    </AuthShell>
   )
 }

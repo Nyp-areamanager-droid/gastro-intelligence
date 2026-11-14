@@ -76,7 +76,9 @@ async function main() {
     'BEGIN;',
   ]
   const report = ['plz;einwohner;zellen;zellen_ohne_wert;haushalte;haushalte_zellen_ohne_wert']
-  for (const p of polys) {
+  // Je PLZ genau eine Zeile – auch wenn eine PLZ in OpenStreetMap aus mehreren
+  // Flächen besteht (z. B. 75378). Früher stand sie dann doppelt im Ergebnis.
+  for (const p of [...new Set(polys.map(x => x.plz))].sort().map(plz => ({ plz }))) {
     const a: PlzAggregate | undefined = pop.byPlz.get(p.plz)
     if (!a) continue
     const h = hh?.byPlz.get(p.plz)

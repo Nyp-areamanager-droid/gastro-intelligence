@@ -17,7 +17,7 @@ import { verifiedPopulation } from '@/lib/geo/population'
  * Diese Route schreibt keine Referenzdaten mehr.
  */
 export async function POST() {
-  const supabase = createServerSupabaseClient()
+  const supabase = await createServerSupabaseClient()
   const auth = await resolveCompanyContext(supabase)
   if (auth.ok === false) {
     return NextResponse.json({ error: auth.error }, { status: auth.status })

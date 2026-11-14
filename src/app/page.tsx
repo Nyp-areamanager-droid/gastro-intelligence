@@ -1,13 +1,14 @@
 import { redirect } from 'next/navigation'
 
-export default function RootPage({
+export default async function RootPage({
   searchParams,
 }: {
-  searchParams: { [key: string]: string | string[] | undefined }
+  searchParams: Promise<{ [key: string]: string | string[] | undefined }>
 }) {
-  if (searchParams.code || searchParams.type === 'recovery') {
-    const code = typeof searchParams.code === 'string' ? searchParams.code : ''
-    redirect(`/auth/reset-password?code=${code}`)
+  const params = await searchParams
+  if (params.code || params.type === 'recovery') {
+    const code = typeof params.code === 'string' ? params.code : ''
+    redirect(`/auth/reset-password?code=${encodeURIComponent(code)}`)
   }
   redirect('/auth/login')
 }

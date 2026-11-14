@@ -18,9 +18,13 @@ type Call = { table: string; ops: [string, unknown[]][] }
 function makeQueryClient(resolver: (call: Call) => { data: unknown; error: unknown }) {
   const calls: Call[] = []
   const storageUploads: string[] = []
+  const storageOptions: Record<string, unknown>[] = []
+  const storageRemoved: string[] = []
   const client = {
     calls,
+    storageRemoved,
     storageUploads,
+    storageOptions,
     from(table: string) {
       const call: Call = { table, ops: [] }
       calls.push(call)
@@ -37,7 +41,8 @@ function makeQueryClient(resolver: (call: Call) => { data: unknown; error: unkno
     },
     storage: {
       from: () => ({
-        upload: (path: string) => { storageUploads.push(path); return Promise.resolve({ error: null }) },
+        remove: (paths: string[]) => { storageRemoved.push(...paths); return Promise.resolve({ data: paths.map(name => ({ name })), error: null }) },
+        upload: (path: string, _body: unknown, opts: Record<string, unknown>) => { storageUploads.push(path); storageOptions.push(opts); return Promise.resolve({ error: null }) },
       }),
     },
   }
@@ -251,8 +256,8 @@ describe('POST /api/upload – Mandantentrennung', () => {
     const { POST } = await import('@/app/api/upload/route')
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await POST(uploadRequest({ user_id: 'jemand-anderes' }) as any)
-    expect(state.authClient!.storageUploads).toHaveLength(1)
-    expect(state.authClient!.storageUploads[0]).toMatch(/^A\/\d+_kunden\.csv$/)
+    // Die Originaldatei wird nicht gespeichert (sie kann Namen und Telefonnummern enthalten)
+    expect(state.authClient!.storageUploads).toHaveLength(0)
     // Erst wird geprüft, ob es schon Uploads gibt (Lesen), dann angelegt
     const uploadInsert = state.authClient!.calls.find(c => c.table === 'uploads' && c.ops.some(([op]) => op === 'insert'))!
     const uploadCheck = state.authClient!.calls.find(c => c.table === 'uploads' && c.ops.some(([op]) => op === 'select') && !c.ops.some(([op]) => op === 'insert'))!
@@ -491,5 +496,245 @@ describe('Provider-Routen – gemeinsame Referenzdaten', () => {
     expect('population' in row).toBe(false)
     expect('households' in row).toBe(false)
     expect('population_source' in row).toBe(false)
+  })
+})
+
+// ── Nr. 10: Upload-Prüfung auf dem Server ────────────────────────────────────
+
+function fileRequest(content: BlobPart[], name: string, type: string, headers: Record<string, string> = {}) {
+  const fd = new FormData()
+  fd.append('file', new File(content, name, { type }))
+  return new Request('http://localhost/api/upload', { method: 'POST', body: fd, headers })
+}
+
+describe('POST /api/upload – Datei wird vor dem Lesen geprüft', () => {
+  beforeEach(() => {
+    state.serviceCreated = 0
+    state.serviceClient = makeQueryClient(() => ({ data: null, error: null }))
+    state.authClient = makeAuthClient({ id: 'u1' }, [{ company_id: 'A', role: 'manager' }])
+  })
+  const nothingStored = () => {
+    expect(state.authClient!.storageUploads).toHaveLength(0)
+    expect(state.authClient!.calls.filter(c => c.ops.some(([op]) => ['insert', 'delete', 'update', 'upsert'].includes(op)))).toHaveLength(0)
+    expect(state.serviceClient!.calls).toHaveLength(0)
+  }
+
+  it('falsche Endung (.html): 415, nichts gespeichert', async () => {
+    const { POST } = await import('@/app/api/upload/route')
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const res = await POST(fileRequest(['<script>alert(1)</script>'], 'kunden.html', 'text/html') as any)
+    expect(res.status).toBe(415)
+    nothingStored()
+  })
+
+  it('getarnte Datei (.xlsx, Inhalt ist Text): 415, nichts gespeichert', async () => {
+    const { POST } = await import('@/app/api/upload/route')
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const res = await POST(fileRequest(['PLZ;Straße\n50733;Neusser Str. 1'], 'kunden.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') as any)
+    expect(res.status).toBe(415)
+    expect((await res.json()).error).toMatch(/passt nicht zur Endung/)
+    nothingStored()
+  })
+
+  it('Binärdatei als .csv: 415, nichts gespeichert', async () => {
+    const { POST } = await import('@/app/api/upload/route')
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const res = await POST(fileRequest([new Uint8Array([0x4d, 0x5a, 0x90, 0x00, 0x03])], 'kunden.csv', 'text/csv') as any)
+    expect(res.status).toBe(415)
+    nothingStored()
+  })
+
+  it('zu groß (Angabe im Kopf der Anfrage): 413, ohne die Datei zu lesen', async () => {
+    const { POST } = await import('@/app/api/upload/route')
+    const req = { headers: new Headers({ 'content-length': String(50 * 1024 * 1024) }), formData: () => { throw new Error('darf nicht gelesen werden') } }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const res = await POST(req as any)
+    expect(res.status).toBe(413)
+    nothingStored()
+  })
+
+  it('zu groß (Datei selbst): 413, nichts gespeichert', async () => {
+    const { POST } = await import('@/app/api/upload/route')
+    const big = 'PLZ;Straße\n' + '50733;Neusser Str. 1\n'.repeat(220_000)  // gut 4,4 MB
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const res = await POST(fileRequest([big], 'kunden.csv', 'text/csv') as any)
+    expect(res.status).toBe(413)
+    nothingStored()
+  })
+
+  it('mehr als 100 verschiedene PLZ: 422, nichts gespeichert', async () => {
+    const { POST } = await import('@/app/api/upload/route')
+    const rows = Array.from({ length: 101 }, (_, i) => `${String(10000 + i * 7)};Hauptstr. 1;Kunde ${i}`).join('\n')
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const res = await POST(fileRequest(['PLZ;Straße;Name\n' + rows], 'kunden.csv', 'text/csv') as any)
+    expect(res.status).toBe(422)
+    expect((await res.json()).error).toMatch(/101 verschiedene Postleitzahlen/)
+    nothingStored()
+  })
+
+  it('gültige CSV: Originaldatei wird nicht gespeichert, Dateityp bestimmt der Server', async () => {
+    const { POST } = await import('@/app/api/upload/route')
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await POST(fileRequest(['PLZ;Straße\n50733;Neusser Str. 1'], 'kunden.csv', 'text/html') as any)
+    expect(state.authClient!.storageUploads).toHaveLength(0)
+    const insert = state.authClient!.calls.find(c => c.table === 'uploads' && c.ops.some(([op]) => op === 'insert'))!
+    const rec = insert.ops.find(([op]) => op === 'insert')![1][0] as Record<string, unknown>
+    expect(rec.file_type).toBe('text/csv')
+    expect(rec.storage_path).toBe('nicht-gespeichert')
+  })
+})
+
+// ── Importvorschau: zeigt alles, speichert nichts ────────────────────────────
+describe('POST /api/upload mit preview=1', () => {
+  beforeEach(() => {
+    state.serviceCreated = 0
+    state.serviceClient = makeQueryClient(() => ({ data: null, error: null }))
+    state.authClient = makeAuthClient({ id: 'u1' }, [{ company_id: 'A', role: 'manager' }])
+  })
+  const previewRequest = (csv: string, extra: Record<string, string> = {}) => {
+    const fd = new FormData()
+    fd.append('file', new File([csv], 'kunden.csv', { type: 'text/csv' }))
+    fd.append('preview', '1')
+    for (const [k, v] of Object.entries(extra)) fd.append(k, v)
+    return new Request('http://localhost/api/upload', { method: 'POST', body: fd })
+  }
+  const CSV = 'Telefon;Vorname;Nachname;E-Mail;Straße;PLZ;Bestellungen;Umsatz;Letztes Bestelldatum\n' +
+    '0221 1000000;Nina;Weiß;nina@example.org;Aachener Straße 10;50859;5;143,91;13.09.2026\n' +
+    '0221 1000001;Yusuf;Kaya;;Hohe Straße 12;50667;2;43,61;26.09.2026\n' +
+    '0221 1000002;Eva;Berg;;Ring 4;ABCDE;1;10,00;01.09.2026\n' +
+    '0221 1000001;Yusuf;Kaya;;Hohe Straße 12;50667;2;43,61;26.09.2026\n'
+
+  it('liefert Zuordnung, Summen, Zeitraum und Fehlerbericht – und schreibt nichts', async () => {
+    const { POST } = await import('@/app/api/upload/route')
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const res = await POST(previewRequest(CSV) as any)
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.preview).toBe(true)
+    expect(body.mapping.postal_code).toBe('PLZ')
+    expect(body.counts).toMatchObject({ rows_in_file: 4, rows_valid: 2, rows_skipped: 1, duplicates: 1, postal_codes: 2 })
+    expect(body.totals).toEqual({ orders: 7, revenue: 187.52 })
+    expect(body.period).toMatchObject({ start: '2026-09-13', end: '2026-09-26', from_file: true })
+    expect(body.problems).toEqual([
+      { row: 4, reason: 'Ungültige Postleitzahl „ABCDE“ – Zeile nicht übernommen' },
+      { row: 5, reason: 'Zeile ist in allen Spalten identisch mit einer früheren Zeile – als doppelt nicht übernommen' },
+    ])
+    // nichts gespeichert, nichts geschrieben
+    expect(state.authClient!.storageUploads).toHaveLength(0)
+    expect(state.authClient!.calls.filter(c => c.ops.some(([op]) => ['insert', 'delete', 'update', 'upsert'].includes(op)))).toHaveLength(0)
+    expect(state.serviceClient!.calls.filter(c => c.ops.some(([op]) => ['insert', 'delete', 'update', 'upsert'].includes(op)))).toHaveLength(0)
+  })
+
+  it('zeigt keine Namen, E-Mails oder Telefonnummern – auch nicht in den Beispielzeilen', async () => {
+    const { POST } = await import('@/app/api/upload/route')
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const body = await (await POST(previewRequest(CSV) as any)).json()
+    expect(body.not_stored).toEqual(['Vorname', 'Nachname', 'E-Mail'])
+    expect(body.phone_pseudonymized).toBe(true)
+    const sample = JSON.stringify(body.sample)
+    for (const secret of ['Nina', 'Kaya', 'example.org', '1000000', '0221']) expect(sample).not.toContain(secret)
+    expect(body.sample[0]).toMatchObject({ postal_code: '50859', street: 'Aachener Straße', total_orders: 5, has_phone_mark: true })
+  })
+
+  it('Zuordnung des Nutzers hat Vorrang vor der automatischen Erkennung', async () => {
+    const { POST } = await import('@/app/api/upload/route')
+    const csv = 'Gebiet;Wert;Menge\n50733;100,50;4\n50735;20,00;1\n'
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const without = await POST(previewRequest(csv) as any)
+    const first = await without.json()
+    expect(first).toMatchObject({ preview: true, needs_mapping: true, headers: ['Gebiet', 'Wert', 'Menge'] })   // keine PLZ-Spalte erkannt
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const body = await (await POST(previewRequest(csv, { mapping: JSON.stringify({ postal_code: 'Gebiet', total_revenue: 'Wert', total_orders: 'Menge', hack: 'Gebiet', street: 'GibtEsNicht' }) }) as any)).json()
+    expect(body.mapping).toMatchObject({ postal_code: 'Gebiet', total_revenue: 'Wert', total_orders: 'Menge' })
+    expect(body.mapping.hack).toBeUndefined(); expect(body.mapping.street).toBeUndefined()
+    expect(body.totals).toEqual({ orders: 5, revenue: 120.5 })
+  })
+})
+
+// ── Daten löschen, Export, Konto ─────────────────────────────────────────────
+
+const jsonReq = (method: string, body?: unknown) => new NextRequest('http://localhost/api/data', { method, body: body === undefined ? undefined : JSON.stringify(body), headers: { 'content-type': 'application/json' } })
+
+describe('DELETE /api/data – alle Daten der eigenen Firma löschen', () => {
+  beforeEach(async () => { state.serviceCreated = 0; (await import('@/lib/security/rate-limit')).resetRateLimits() })
+  const deletes = () => state.authClient!.calls.filter(c => c.ops.some(([op]) => op === 'delete'))
+
+  it('ohne Anmeldung: 401, nichts gelöscht', async () => {
+    state.authClient = makeAuthClient(null, null)
+    const { DELETE } = await import('@/app/api/data/route')
+    expect((await DELETE(jsonReq('DELETE', { confirm: 'LÖSCHEN' }))).status).toBe(401)
+    expect(deletes()).toHaveLength(0)
+  })
+  it.each(['manager', 'viewer'])('Rolle %s: 403, nichts gelöscht', async role => {
+    state.authClient = makeAuthClient({ id: 'u1' }, [{ company_id: 'A', role }])
+    const { DELETE } = await import('@/app/api/data/route')
+    expect((await DELETE(jsonReq('DELETE', { confirm: 'LÖSCHEN' }))).status).toBe(403)
+    expect(deletes()).toHaveLength(0)
+  })
+  it('ohne Bestätigungswort: 400, nichts gelöscht', async () => {
+    state.authClient = makeAuthClient({ id: 'u1' }, [{ company_id: 'A', role: 'owner' }])
+    const { DELETE } = await import('@/app/api/data/route')
+    expect((await DELETE(jsonReq('DELETE', { confirm: 'ja' }))).status).toBe(400)
+    expect((await DELETE(jsonReq('DELETE'))).status).toBe(400)
+    expect(deletes()).toHaveLength(0)
+  })
+  it('Inhaber: löscht nur in der eigenen Firma, in der richtigen Reihenfolge; fremde Firmen-ID in der Anfrage wird ignoriert', async () => {
+    state.authClient = makeAuthClient({ id: 'u1' }, [{ company_id: 'A', role: 'owner' }], null,
+      call => call.table === 'uploads' && call.ops.some(([op]) => op === 'select') && !call.ops.some(([op]) => op === 'delete')
+        ? { data: [{ storage_path: 'A/1_alt.csv' }, { storage_path: 'B/2_fremd.csv' }, { storage_path: 'nicht-gespeichert' }, { storage_path: null }], error: null }
+        : { data: null, error: null })
+    const { DELETE } = await import('@/app/api/data/route')
+    const res = await DELETE(jsonReq('DELETE', { confirm: 'LÖSCHEN', company_id: 'B' }))
+    expect(res.status).toBe(200)
+    expect(deletes().map(c => c.table)).toEqual(['marketing_actions', 'alerts', 'street_analytics', 'analytics', 'customers', 'uploads'])
+    for (const c of deletes()) expect(c.ops).toContainEqual(['eq', ['company_id', 'A']])
+    // nur Dateien aus dem eigenen Firmenordner
+    expect(state.authClient!.storageRemoved).toEqual(['A/1_alt.csv'])
+    expect(state.serviceCreated).toBe(0)
+  })
+})
+
+describe('GET /api/export', () => {
+  beforeEach(async () => { (await import('@/lib/security/rate-limit')).resetRateLimits() })
+  it('ohne Anmeldung: 401', async () => {
+    state.authClient = makeAuthClient(null, null)
+    const { GET } = await import('@/app/api/export/route')
+    expect((await GET(new NextRequest('http://localhost/api/export?type=plz'))).status).toBe(401)
+  })
+  it('unbekannter Typ: 400', async () => {
+    state.authClient = makeAuthClient({ id: 'u1' }, [{ company_id: 'A', role: 'viewer' }])
+    const { GET } = await import('@/app/api/export/route')
+    expect((await GET(new NextRequest('http://localhost/api/export?type=kunden'))).status).toBe(400)
+  })
+  it('Straßen: CSV nur aus der eigenen Firma, Formeln entschärft', async () => {
+    state.authClient = makeAuthClient({ id: 'u1' }, [{ company_id: 'A', role: 'viewer' }], null, call => {
+      if (call.table === 'analytics') return { data: [{ id: 'an1', postal_code: '50733', computed_at: '2026-11-01' }], error: null }
+      if (call.table === 'street_analytics') return { data: [{ postal_code: '50733', street_name: '=HYPERLINK("http://evil")', customer_count: 2, order_count: 5, revenue: 120.5, street_class: 'A', is_in_official_list: true }], error: null, count: 1 } as never
+      return { data: null, error: null }
+    })
+    const { GET } = await import('@/app/api/export/route')
+    const res = await GET(new NextRequest('http://localhost/api/export?type=strassen'))
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toContain('text/csv')
+    expect(res.headers.get('content-disposition')).toMatch(/attachment; filename="gastro-intelligence-strassen-\d{4}-\d{2}-\d{2}\.csv"/)
+    const text = await res.text()
+    expect(text).toContain(`50733;"'=HYPERLINK(""http://evil"")";2;5;120,5;A;ja`)
+    for (const c of state.authClient!.calls.filter(c => ['analytics', 'street_analytics'].includes(c.table))) expect(c.ops).toContainEqual(['eq', ['company_id', 'A']])
+  })
+})
+
+describe('GET /api/account', () => {
+  it('ohne Anmeldung: 401', async () => {
+    state.authClient = makeAuthClient(null, null)
+    const { GET } = await import('@/app/api/account/route')
+    expect((await GET()).status).toBe(401)
+  })
+  it('liest nur die eigene Firma', async () => {
+    state.authClient = makeAuthClient({ id: 'u1' }, [{ company_id: 'A', role: 'viewer' }])
+    const { GET } = await import('@/app/api/account/route')
+    const res = await GET()
+    expect(res.status).toBe(200)
+    for (const c of state.authClient!.calls.filter(c => ['stores', 'uploads', 'customers', 'analytics'].includes(c.table))) expect(c.ops).toContainEqual(['eq', ['company_id', 'A']])
+    expect(state.authClient!.calls.find(c => c.table === 'companies')!.ops).toContainEqual(['eq', ['id', 'A']])
   })
 })

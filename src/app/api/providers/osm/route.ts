@@ -1,3 +1,4 @@
+import { rateLimit, tooManyRequests } from '@/lib/security/rate-limit'
 import { NextRequest, NextResponse } from 'next/server'
 import { createServerSupabaseClient, createReferenceDataClient } from '@/lib/supabase/server'
 import { resolveCompanyContext, hasRole, ADMIN_ROLES } from '@/lib/auth/company-context'
@@ -10,10 +11,14 @@ const DEFAULT_CATEGORIES = ['restaurant', 'hotel', 'school', 'hospital', 'author
 export async function GET(req: NextRequest) {
   // Nur für eingeloggte Mitglieder einer Firma. Die Route schreibt mit dem
   // Service-Key in gemeinsame Referenztabellen (keine Firmendaten).
-  const auth = await resolveCompanyContext(createServerSupabaseClient())
+  const auth = await resolveCompanyContext(await createServerSupabaseClient())
   if (auth.ok === false) {
     return NextResponse.json({ error: auth.error }, { status: auth.status })
   }
+
+  // Missbrauchsschutz: höchstens 30 Abrufe je Nutzer und Minute
+  const limited = rateLimit(`osm:${auth.ctx.userId}`, 30, 60_000)
+  if (!limited.ok) { const t = tooManyRequests(limited); return NextResponse.json(t.body, t.init) }
 
   const plz = req.nextUrl.searchParams.get('plz')
   const categoriesParam = req.nextUrl.searchParams.get('categories') || DEFAULT_CATEGORIES.join(',')

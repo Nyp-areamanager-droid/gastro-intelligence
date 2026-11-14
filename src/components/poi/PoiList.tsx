@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { fetchAllRows } from '@/lib/supabase/fetch-all'
+import { Card, EmptyState, Notice, PageHeader, PageSkeleton } from '@/components/ui'
 
 type Mode = 'competitor' | 'b2b'
 
@@ -22,7 +23,7 @@ const TEXT: Record<Mode, { title: string; subtitle: string; method: string; empt
     empty: 'In OpenStreetMap ist für diese PLZ kein passender Betrieb erfasst.',
   },
   b2b: {
-    title: 'B2B-Potenzial',
+    title: 'Firmenkunden',
     subtitle: 'Hotels, Schulen, Kliniken, Behörden und Büros in Ihren Postleitzahlen',
     method: 'Quelle: Einträge in OpenStreetMap. Wie vollständig sie sind, hängt davon ab, wie gut die Gegend dort erfasst ist; Firmen ohne Eintrag fehlen. Es gibt keine Angaben zu Mitarbeiterzahlen oder Bedarf.',
     empty: 'In OpenStreetMap ist für diese PLZ kein passender Eintrag erfasst.',
@@ -78,44 +79,41 @@ export function PoiList({ mode }: { mode: Mode }) {
   }
 
   const t = TEXT[mode]
-  if (loading) return <div className="flex items-center justify-center h-full"><div className="w-8 h-8 border-2 border-red-500 border-t-transparent rounded-full animate-spin" /></div>
+  if (loading) return <PageSkeleton stats={0} blocks={2} />
 
   return (
-    <div className="p-6 max-w-4xl">
-      <h1 className="text-2xl font-bold mb-1">{t.title}</h1>
-      <p className="text-[#8a9bb5] text-sm mb-3">{t.subtitle}</p>
-      <div className="text-xs text-[#8a9bb5] bg-[#1a2233] border border-[#2a3d5a] rounded-xl p-3 mb-6">{t.method}</div>
+    <div className="page max-w-[980px]">
+      <PageHeader title={t.title} lead={t.subtitle} />
+      <Notice tone="info" title="So entsteht diese Liste">{t.method}</Notice>
 
       {plzList.length === 0 ? (
-        <div className="text-center py-16 text-[#4a5a70]">Noch keine eigenen PLZ – bitte zuerst eine Datei hochladen.</div>
+        <div className="mt-6"><EmptyState title="Noch keine eigenen Liefergebiete" action={{ href: '/uploads', label: 'Datei importieren' }}>Die Liste zeigt Einträge in den Postleitzahlen, aus denen bei Ihnen bestellt wurde.</EmptyState></div>
       ) : plzList.map(plz => {
         const items = pois.filter(p => p.postal_code === plz)
         const fetched = items.concat().sort((a, b) => (b.last_fetched_at || '').localeCompare(a.last_fetched_at || ''))[0]?.last_fetched_at
         return (
-          <section key={plz} className="mb-6">
-            <div className="flex items-center gap-3 mb-2 flex-wrap">
-              <h2 className="font-semibold">PLZ {plz}</h2>
-              {loadedPlz.has(plz)
-                ? <span className="text-xs text-[#4a5a70]">{items.length} Einträge · OpenStreetMap{fetched ? ` · Stand ${new Date(fetched).toLocaleDateString('de-DE')}` : ''}</span>
-                : <span className="text-xs text-amber-300">Noch keine Daten geladen</span>}
-              <button className="btn-ghost text-xs ml-auto" disabled={busy !== null} onClick={() => fetchPlz(plz)}>
-                {busy === plz ? 'Lädt …' : loadedPlz.has(plz) ? 'Neu laden' : 'Daten laden'}
-              </button>
-            </div>
-            {messages[plz] && <div className="text-xs text-amber-300 mb-2">{messages[plz]}</div>}
-            {loadedPlz.has(plz) && items.length === 0 && <div className="text-xs text-[#4a5a70]">{t.empty}</div>}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {items.map(p => (
-                <div key={p.id} className="bg-[#1a2233] border border-[#2a3d5a] rounded-xl p-4">
-                  <div className="font-semibold text-sm mb-1">{p.name}</div>
-                  <div className="text-xs text-[#8a9bb5]">{CATEGORY_LABELS[p.category] || p.category}</div>
-                </div>
-              ))}
-            </div>
-          </section>
+          <Card key={plz} className="mt-4" pad={false}
+            title={<>PLZ <span className="num">{plz}</span></>}
+            lead={loadedPlz.has(plz)
+              ? `${items.length} ${items.length === 1 ? 'Eintrag' : 'Einträge'} · OpenStreetMap${fetched ? ` · Stand ${new Date(fetched).toLocaleDateString('de-DE')}` : ''}`
+              : 'Für diese Postleitzahl wurden noch keine Daten abgerufen.'}
+            actions={<button className="btn-secondary btn-sm" disabled={busy !== null} onClick={() => fetchPlz(plz)}>
+              {busy === plz ? 'Wird abgerufen …' : loadedPlz.has(plz) ? 'Aktualisieren' : 'Daten abrufen'}
+            </button>}>
+            {messages[plz] && <div className="px-4 pb-3 sm:px-5"><Notice tone="warn">{messages[plz]}</Notice></div>}
+            {loadedPlz.has(plz) && items.length === 0 && <p className="px-4 pb-4 text-ink-soft sm:px-5">{t.empty}</p>}
+            {items.length > 0 && (
+              <div className="table-wrap">
+                <table className="table">
+                  <thead><tr><th>Name</th><th>Art</th></tr></thead>
+                  <tbody>{items.map(p => <tr key={p.id}><td className="font-medium">{p.name}</td><td className="text-ink-soft">{CATEGORY_LABELS[p.category] || p.category}</td></tr>)}</tbody>
+                </table>
+              </div>
+            )}
+          </Card>
         )
       })}
-      <p className="text-[11px] text-[#4a5a70] mt-6">Daten © OpenStreetMap-Mitwirkende (ODbL)</p>
+      <p className="mt-6 text-[12.5px] text-ink-muted">Daten © OpenStreetMap-Mitwirkende (ODbL)</p>
     </div>
   )
 }

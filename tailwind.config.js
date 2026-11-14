@@ -1,26 +1,24 @@
 /** @type {import('tailwindcss').Config} */
+// Farben und Schrift kommen aus den Gestaltungsvariablen in src/app/globals.css.
+// Neue Farben bitte dort ergänzen, nicht als feste Werte in einzelnen Seiten.
+const v = name => `rgb(var(--${name}) / <alpha-value>)`
 module.exports = {
-  content: [
-    './src/pages/**/*.{js,ts,jsx,tsx,mdx}',
-    './src/components/**/*.{js,ts,jsx,tsx,mdx}',
-    './src/app/**/*.{js,ts,jsx,tsx,mdx}',
-  ],
+  content: ['./src/components/**/*.{ts,tsx}', './src/app/**/*.{ts,tsx}'],
   theme: {
     extend: {
       colors: {
-        'brand-red':  '#e63027',
-        'brand-dark': '#07090f',
-        'surface':    '#111827',
-        'surface2':   '#1a2233',
-        'border-dim': '#1f2d45',
-        'border2':    '#2a3d5a',
-        'muted':      '#8a9bb5',
+        canvas: v('canvas'), surface: v('surface'), sunken: v('sunken'),
+        ink: { DEFAULT: v('ink'), soft: v('ink-soft'), muted: v('ink-muted') },
+        line: { DEFAULT: v('line'), strong: v('line-strong') },
+        accent: { DEFAULT: v('accent'), hover: v('accent-hover'), soft: v('accent-soft') },
+        good: { DEFAULT: v('good'), soft: v('good-soft') },
+        warn: { DEFAULT: v('warn'), soft: v('warn-soft') },
+        bad: { DEFAULT: v('bad'), soft: v('bad-soft') },
       },
-      fontFamily: {
-        head: ['var(--font-syne)', 'sans-serif'],
-        mono: ['var(--font-dm-mono)', 'monospace'],
-        sans: ['var(--font-dm-sans)', 'sans-serif'],
-      },
+      fontFamily: { sans: ['"IBM Plex Sans"', 'system-ui', '-apple-system', '"Segoe UI"', 'sans-serif'] },
+      fontSize: { '2xs': ['0.6875rem', '1rem'] },
+      borderRadius: { card: '10px', control: '8px' },
+      boxShadow: { pop: '0 8px 28px rgb(23 33 43 / 0.14)', raise: '0 1px 2px rgb(23 33 43 / 0.06)' },
     },
   },
   plugins: [],

@@ -15,6 +15,24 @@ export const POPULATION_SOURCE_TEXT =
 
 export const MISSING_POPULATION_TEXT = 'Keine belegte Einwohnerzahl für diese PLZ'
 
+/**
+ * Unter dieser Einwohnerzahl ist eine PLZ-Summe aus dem Zensus-Gitter
+ * unsicher: Der Zensus hält kleine Zellwerte geheim bzw. verrauscht sie.
+ * Solche Werte werden angezeigt, aber gekennzeichnet und nicht für
+ * Empfehlungen verwendet (gleiche Grenze wie RULES.MIN_POPULATION).
+ */
+export const MIN_RELIABLE_POPULATION = 1000
+
+export const LIMITED_POPULATION_TEXT =
+  'Unter 1.000 Einwohnern: Der Zensus hält kleine Werte geheim bzw. verändert sie leicht. Die Zahl ist deshalb nur eingeschränkt belastbar.'
+
+export const HOUSEHOLDS_NOTE_TEXT =
+  'Haushalte fehlen dort, wo die Zensus-Werte für die PLZ lückenhaft sind (meist dünn besiedelte Gebiete). Sie werden nicht geschätzt.'
+
+export function isLimitedPopulation(population: number | null | undefined): boolean {
+  return typeof population === 'number' && population > 0 && population < MIN_RELIABLE_POPULATION
+}
+
 export interface PostalCodeRecord {
   population?: number | null
   households?: number | null

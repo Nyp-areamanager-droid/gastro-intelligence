@@ -1,232 +1,189 @@
 'use client'
-
-import { useEffect, useState } from 'react'
-import { createClient } from '@/lib/supabase/client'
-import { computeDashboardKPIs, generateRecommendations } from '@/lib/analysis/engine'
-import type { DashboardKPIs, Alert, MarketingRecommendation, PLZAnalysisResult, ParsedCustomerRow } from '@/types'
+// Übersicht: Wie läuft der Betrieb, wo liegt Potenzial, was hat sich verändert?
+// Alle Zahlen kommen fertig berechnet von /api/overview (lib/insights/overview.ts).
+import { useState } from 'react'
 import Link from 'next/link'
-import { fetchAllRows } from '@/lib/supabase/fetch-all'
-import { mergeCustomers } from '@/lib/analysis/merge-customers'
+import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { Card, Delta, EmptyState, LoadError, Notice, PageHeader, PageSkeleton, SegmentedControl, Stat, InfoTip, fmtDate, fmtEur, fmtInt, fmtNum, fmtPct } from '@/components/ui'
+import { RecommendationCard } from '@/components/insights/RecommendationCard'
+import { useOverview } from '@/lib/insights/use-overview'
+import { RangePicker } from '@/components/insights/RangePicker'
+import type { SeriesPoint } from '@/lib/insights/overview'
 
-const actionColors: Record<string, string> = { sms: '#e63027', flyer: '#f5a623', b2b_visit: '#00d084', loyalty: '#2e86c1', reactivation: '#ff6b4a', coupon: '#7c6dfa' }
+const ACCENT = '#1F4B99'
+
+function Chart({ data, valueKey, unit }: { data: { label: string; value: number }[]; valueKey: string; unit: string }) {
+  return (
+    <div className="h-[240px] w-full" role="img" aria-label={`Diagramm: ${valueKey}`}>
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={data} margin={{ top: 8, right: 4, left: 0, bottom: 0 }}>
+          <CartesianGrid vertical={false} stroke="#E2E6EB" />
+          <XAxis dataKey="label" tick={{ fontSize: 12, fill: '#687380' }} tickLine={false} axisLine={{ stroke: '#C9D0D9' }} interval="preserveStartEnd" minTickGap={24} />
+          <YAxis tick={{ fontSize: 12, fill: '#687380' }} tickLine={false} axisLine={false} width={56} tickFormatter={v => Number(v).toLocaleString('de-DE')} />
+          <Tooltip cursor={{ fill: '#EEF1F4' }} contentStyle={{ borderRadius: 8, border: '1px solid #E2E6EB', fontSize: 13, boxShadow: '0 8px 28px rgb(23 33 43 / 0.14)' }}
+            formatter={(v: number) => [`${Number(v).toLocaleString('de-DE', { maximumFractionDigits: 2 })} ${unit}`, valueKey]} />
+          <Bar dataKey="value" fill={ACCENT} radius={[3, 3, 0, 0]} maxBarSize={36} isAnimationActive={false} />
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}
 
 export default function DashboardPage() {
-  const [kpis, setKpis] = useState<DashboardKPIs | null>(null)
-  const [alerts, setAlerts] = useState<Alert[]>([])
-  const [recs, setRecs] = useState<MarketingRecommendation[]>([])
-  const [plzData, setPlzData] = useState<PLZAnalysisResult[]>([])
-  const [loading, setLoading] = useState(true)
-  const supabase = createClient()
+  const { data, error, loading, reload, store, setStore, range, setRange } = useOverview()
+  const [grain, setGrain] = useState<'daily' | 'weekly' | 'monthly'>('weekly')
+  const [metric, setMetric] = useState<'revenue' | 'orders'>('revenue')
 
-  useEffect(() => {
-    async function load() {
-      const { data: { user } } = await supabase.auth.getUser()
-      if (!user) return
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { data: membership } = await (supabase.from('company_users') as any).select('company_id').eq('user_id', user.id).single()
-      if (!membership) return
-      const companyId = membership.company_id
-      // Alle Kunden laden – ohne Paging schneidet Supabase bei 1.000 Zeilen ab
-      // und die Kennzahlen wären bei größeren Datenbeständen zu niedrig
-      const { data: customers } = await fetchAllRows((from, to) =>
-        supabase.from('customers').select('*', { count: 'exact' }).eq('company_id', companyId).order('id').range(from, to))
-      const { data: dbAlerts } = await supabase.from('alerts').select('*').eq('company_id', companyId).eq('is_resolved', false).order('created_at', { ascending: false }).limit(10)
-      let { data: analytics } = await supabase.from('analytics').select('*').eq('company_id', companyId).order('computed_at', { ascending: false })
-      // Auto-sync Einwohner wenn noch keine Daten
-      if (analytics && analytics.some(a => !a.population)) {
-        await fetch('/api/sync-population', { method: 'POST' }).catch(() => {})
-        const { data: fresh } = await supabase.from('analytics').select('*').eq('company_id', companyId).order('computed_at', { ascending: false })
-        if (fresh) analytics = fresh
-      }
-      if (customers?.length) {
-        // Dieselbe Person aus mehreren Zeiträumen (ergänzte Uploads) zählt als ein Kunde
-        const rows = mergeCustomers(customers.map(c => ({
-          customer_ref: c.customer_ref || undefined,
-          phone_normalized: c.phone_normalized || undefined, full_name: c.full_name || undefined,
-          house_number: c.house_number || undefined,
-          postal_code: c.postal_code, street: c.street, street_normalized: c.street_normalized,
-          city: c.city, total_orders: c.total_orders, total_revenue: c.total_revenue,
-          avg_order_value: c.avg_order_value, last_order_date: c.last_order_date,
-          is_vip: c.is_vip, rfm_segment: c.rfm_segment, late_deliveries: c.late_deliveries || 0, _row_index: 0, _errors: [],
-        })) as ParsedCustomerRow[])
-        const computed = computeDashboardKPIs(rows)
-        setKpis({ ...computed, critical_alerts: dbAlerts?.filter(a => a.severity === 'critical').length || 0 })
-        // Deduplizieren nach postal_code (neueste Einträge behalten)
-        const seenPlz = new Map<string, any>()
-        for (const a of (analytics || [])) {
-          if (!seenPlz.has(a.postal_code) || (a.computed_at > (seenPlz.get(a.postal_code)?.computed_at || ''))) {
-            seenPlz.set(a.postal_code, a)
-          }
-        }
-        const plzAnalyses = Array.from(seenPlz.values()).map(a => ({
-          postal_code: a.postal_code || '', city: '', customer_count: a.customer_count || 0,
-          order_count: a.order_count || 0, revenue: a.revenue || 0, avg_order_value: a.avg_order_value || 0,
-          orders_per_customer: a.orders_per_customer || 0,
-          // Einwohner nur aus belegter Quelle (gespeichert in der Analyse); sonst „—“
-          population: a.population || null,
-          households: null, population_source: null,
-          market_penetration_pct: a.population ? (a.market_penetration_pct ?? null) : null,
-          not_reached_residents: a.population ? (a.not_reached_residents ?? null) : null,
-          // null = Straßenverzeichnis fehlte → keine Aussage, nicht 0
-          not_reached_pct: null, streets_total: a.streets_total ?? null, streets_with_orders: a.streets_with_orders ?? null,
-          streets_without_orders: a.streets_without_orders ?? null, streets_coverage_pct: a.streets_coverage_pct ?? null,
-          flyer_potential_eur: null, potential_scenarios: (a.potential_scenarios as PLZAnalysisResult['potential_scenarios']) || [],
-          one_time_buyers: a.one_time_buyers || 0, repeat_customers: a.repeat_customers || 0,
-          vip_customers: a.vip_customers || 0, warnings: [],
-          poi_summary: { competitors:0, hotels:0, schools:0, hospitals:0, offices:0, restaurants:0, total_b2b_targets:0 },
-        })) as PLZAnalysisResult[]
-        setPlzData(plzAnalyses)
-        setRecs(generateRecommendations(computed, plzAnalyses, []))
-      }
-      // Gleiche Warnung nur einmal zeigen (neueste zuerst geladen). Ältere Uploads
-      // haben früher dieselben Warnungen erneut angelegt.
-      const seenAlert = new Set<string>()
-      setAlerts((dbAlerts || []).filter(a => {
-        const key = `${a.category}|${a.title}`
-        if (seenAlert.has(key)) return false
-        seenAlert.add(key)
-        return true
-      }))
-      setLoading(false)
-    }
-    load()
-  }, [])
+  if (loading && !data) return <PageSkeleton />
+  if (error || !data) return <LoadError message={error || 'Keine Antwort'} onRetry={reload} />
+  const { overview: o, recommendations, stores } = data
 
-  if (loading) return (
-    <div style={{ display:'flex', alignItems:'center', justifyContent:'center', height:'100%' }}>
-      <div style={{ textAlign:'center' }}>
-        <div style={{ width:'40px', height:'40px', border:'3px solid #e63027', borderTopColor:'transparent', borderRadius:'50%', animation:'spin 0.8s linear infinite', margin:'0 auto 16px' }} />
-        <div style={{ color:'#8a9bb5', fontSize:'14px' }}>Dashboard wird geladen...</div>
-        <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
-      </div>
+  if (o.empty && !data.range.applied && !range) return (
+    <div className="page">
+      <PageHeader title="Übersicht" />
+      <EmptyState title="Noch keine Bestelldaten" action={{ href: '/uploads', label: 'Erste Datei importieren' }}>
+        Importieren Sie einen Export aus Ihrem Kassen- oder Bestellsystem (CSV oder Excel). Danach sehen Sie hier Umsatz, Bestellungen und Ihre Liefergebiete nach Postleitzahl und Straße.
+      </EmptyState>
     </div>
   )
 
-  if (!kpis) return (
-    <div style={{ display:'flex', alignItems:'center', justifyContent:'center', height:'100%' }}>
-      <div style={{ textAlign:'center', maxWidth:'400px' }}>
-        <div style={{ fontSize:'56px', marginBottom:'16px' }}>📊</div>
-        <h2 style={{ fontSize:'20px', fontWeight:700, color:'#fff', marginBottom:'8px' }}>Noch keine Daten</h2>
-        <p style={{ color:'#8a9bb5', fontSize:'14px', marginBottom:'24px' }}>Laden Sie Ihre erste Excel-Datei hoch um die Analyse zu starten.</p>
-        <Link href="/uploads" style={{ background:'#e63027', color:'#fff', padding:'10px 24px', borderRadius:'8px', textDecoration:'none', fontWeight:600, fontSize:'14px' }}>Datei hochladen →</Link>
-      </div>
-    </div>
-  )
-
-  const einmaelKaeuferPct = (100 - kpis.repeat_rate_pct)
-  const card = (color: string): React.CSSProperties => ({ background:'#111827', border:'1px solid #1f2d45', borderRadius:'12px', padding:'20px', borderTop:`3px solid ${color}` })
+  const t = o.totals, c = o.change
+  const main = recommendations.filter(r => r.kind !== 'data_gap').slice(0, 3)
+  const maxRate = Math.max(0, ...o.plz.map(p => p.orders_per_1000 ?? 0))
+  const series: SeriesPoint[] = o.series.available ? o.series[grain] : []
+  const declining = o.streets.changes.filter(s => s.previous_orders >= 8 && s.change_pct <= -40).slice(0, 6)
 
   return (
-    <div style={{ padding:'28px 32px', maxWidth:'1300px', margin:'0 auto' }}>
-      <style>{`@keyframes spin{to{transform:rotate(360deg)}}tr:hover td{background:rgba(26,34,51,0.5)}`}</style>
+    <div className="page">
+      <PageHeader title="Übersicht"
+        lead={o.coverage.start && o.coverage.end
+          ? <>Daten vom {fmtDate(o.coverage.start)} bis {fmtDate(o.coverage.end)}{o.coverage.days ? `, ${fmtInt(o.coverage.days)} Tage` : ''}{o.periods.length > 1 ? ` aus ${o.periods.length} Importen` : ''}.</>
+          : <>Der Zeitraum Ihrer Daten ist nicht vollständig bekannt. Werte je Tag können deshalb nicht berechnet werden.</>}
+        actions={<>
+          <RangePicker info={data.range} value={range} onChange={setRange} />
+          {stores.length > 1 && (
+            <select aria-label="Standort" className="input h-9 w-auto" value={store || ''} onChange={e => setStore(e.target.value || null)}>
+              <option value="">Alle Standorte</option>
+              {stores.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          )}
+          <Link href="/uploads" className="btn-secondary">Daten importieren</Link>
+        </>} />
 
-      <div style={{ marginBottom:'28px' }}>
-        <h1 style={{ fontSize:'24px', fontWeight:700, color:'#fff', margin:0 }}>CEO Dashboard</h1>
-        <p style={{ fontSize:'13px', color:'#8a9bb5', marginTop:'4px' }}>Gesamtüberblick · Chancen · Risiken</p>
+      {range && !data.range.applied && data.range.reason && <div className="mb-3"><Notice tone="warn" title="Zeitraum nicht anwendbar">{data.range.reason} Gezeigt werden alle Daten.</Notice></div>}
+      {data.range.applied && <div className="mb-3"><Notice tone="info">Gezeigt wird nur der gewählte Zeitraum. „Straßen ohne Bestellung“ gilt immer für den gesamten Bestand und wird deshalb hier nicht ausgewiesen.</Notice></div>}
+      <div className={`grid grid-cols-2 gap-3 lg:grid-cols-4 ${loading ? 'opacity-60' : ''}`} aria-busy={loading}>
+        <Stat label="Umsatz" value={fmtEur(t.revenue)} help="Summe der Spalte Umsatz aller importierten Zeilen."
+          sub={c?.comparable ? <>je Tag <Delta value={c.revenue_per_day_pct} /> als im Vorzeitraum</> : o.coverage.days ? `${fmtEur(t.revenue / o.coverage.days)} je Tag` : undefined} />
+        <Stat label="Bestellungen" value={fmtInt(t.orders)} help="Summe der Bestellungen aller importierten Zeilen. Fehlt die Spalte, zählt jede Zeile als eine Bestellung."
+          sub={c?.comparable ? <>je Tag <Delta value={c.orders_per_day_pct} /></> : o.coverage.days ? `${fmtNum(t.orders / o.coverage.days)} je Tag` : undefined} />
+        <Stat label="Bestellwert im Schnitt" value={fmtEur(t.avg_order_value, 2)} help="Umsatz geteilt durch Zahl der Bestellungen."
+          sub={c?.comparable ? <><Delta value={c.avg_order_value_pct} /> als im Vorzeitraum</> : undefined} />
+        <Stat label="Kunden" value={fmtInt(t.customers)}
+          help="Dieselbe Person wird über Kundennummer oder Telefon-Kennzeichen erkannt und einmal gezählt. Datensätze ohne Kennung zählen je als ein Kunde."
+          sub={t.repeat_customers_pct !== null ? `${fmtPct(t.repeat_customers_pct)} mit mindestens zwei Bestellungen` : 'Wiederkehrende Kunden nicht bestimmbar'} />
       </div>
 
-      {/* KPI Grid 3x2 */}
-      <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:'16px', marginBottom:'24px' }}>
-        {[
-          { label:'👥 Kunden gesamt', value: kpis.total_customers.toLocaleString('de-DE'), sub:`${kpis.repeat_rate_pct}% Stammkunden`, color:'#2e86c1' },
-          { label:'🛍️ Bestellungen', value: kpis.total_orders.toLocaleString('de-DE'), sub:'Gesamt', color:'#f5a623' },
-          { label:'💶 Umsatz', value:`${(kpis.total_revenue/1000).toFixed(1)}k €`, sub:`Ø ${kpis.avg_order_value.toFixed(2)} € pro Bestellung`, color:'#00d084' },
-          { label:'⚡ Einmalkäufer', value:`${einmaelKaeuferPct.toFixed(0)}%`, sub:'Ziel: unter 60%', color: einmaelKaeuferPct > 60 ? '#e63027':'#f5a623' },
-          { label:'⏱️ Verspätungsrate', value:`${kpis.late_delivery_pct}%`, sub:'Ziel: unter 5%', color: kpis.late_delivery_pct > 10 ? '#e63027':'#00d084' },
-          { label:'📍 PLZ-Gebiete', value: kpis.active_plz_count.toString(), sub:`Top: ${kpis.top_plz}`, color:'#7c6dfa' },
-        ].map((k,i) => (
-          <div key={i} style={card(k.color)}>
-            <div style={{ fontSize:'11px', color:'#8a9bb5', textTransform:'uppercase', letterSpacing:'0.8px', marginBottom:'8px' }}>{k.label}</div>
-            <div style={{ fontSize:'28px', fontWeight:700, color:k.color, fontFamily:'monospace', lineHeight:1 }}>{k.value}</div>
-            <div style={{ fontSize:'12px', color:'#4a5a70', marginTop:'6px' }}>{k.sub}</div>
-          </div>
-        ))}
-      </div>
-
-      {(kpis.unidentified_records ?? 0) > 0 && (
-        <div role="status" style={{ background:'rgba(245,166,35,0.08)', border:'1px solid rgba(245,166,35,0.35)', borderRadius:'10px', padding:'12px 16px', marginTop:'-8px', marginBottom:'24px', fontSize:'13px', color:'#f5c26b' }}>
-          {(kpis.unidentified_records ?? 0).toLocaleString('de-DE')} von {kpis.total_customers.toLocaleString('de-DE')} Kundendatensätzen haben weder Kundennummer noch Telefonnummer.
-          Sie zählen je als ein Kunde. Stammt dieselbe Person aus mehreren Dateien oder Zeilen, ist die Kundenzahl deshalb eher zu hoch.
-          Bestellungen und Umsatz sind davon nicht betroffen.
+      {t.identified_share_pct !== null && t.unidentified_records > 0 && (
+        <div className="mt-3">
+          <Notice tone="warn">
+            {fmtInt(t.unidentified_records)} von {fmtInt(t.records)} Datensätzen haben weder Kundennummer noch Telefon-Kennzeichen.
+            Sie zählen je als ein Kunde, die Kundenzahl ist deshalb eher zu hoch. Umsatz und Bestellungen sind davon nicht betroffen.
+          </Notice>
         </div>
       )}
 
-      {/* 2-Column */}
-      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'20px', marginBottom:'20px' }}>
-        {/* Alerts */}
-        <div style={{ background:'#111827', border:'1px solid #1f2d45', borderRadius:'12px', padding:'20px' }}>
-          <div style={{ fontSize:'11px', color:'#8a9bb5', textTransform:'uppercase', letterSpacing:'0.8px', marginBottom:'16px', fontWeight:600 }}>⚠️ Frühwarnungen</div>
-          {alerts.length === 0
-            ? <div style={{ textAlign:'center', padding:'24px 0', color:'#4a5a70' }}>✅ Alles in Ordnung</div>
-            : alerts.slice(0,5).map(a => (
-              <div key={a.id} style={{ border:`1px solid ${a.severity==='critical'?'rgba(239,68,68,0.3)':'rgba(245,166,35,0.3)'}`, background: a.severity==='critical'?'rgba(239,68,68,0.07)':'rgba(245,166,35,0.07)', borderRadius:'8px', padding:'12px', marginBottom:'8px' }}>
-                <div style={{ fontSize:'12px', fontWeight:600, color: a.severity==='critical'?'#f87171':'#fbbf24' }}>{a.severity==='critical'?'🔴':'🟡'} {a.title}</div>
-                <div style={{ fontSize:'11px', color:'#8a9bb5', marginTop:'3px' }}>{a.message}</div>
-              </div>
-            ))
-          }
-        </div>
+      {main.length > 0 && (
+        <section className="mt-8">
+          <div className="mb-3 flex items-end justify-between gap-3">
+            <div><h2 className="section-title">Was jetzt wichtig ist</h2><p className="section-lead">Aus Ihren Zahlen abgeleitet. Jede Empfehlung zeigt, worauf sie beruht.</p></div>
+            <Link href="/marketing" className="link shrink-0 text-[13.5px]">Alle {recommendations.length} ansehen</Link>
+          </div>
+          <div className="grid gap-3 lg:grid-cols-3">{main.map(r => <RecommendationCard key={r.id} rec={r} compact />)}</div>
+        </section>
+      )}
 
-        {/* Maßnahmen */}
-        <div style={{ background:'#111827', border:'1px solid #1f2d45', borderRadius:'12px', padding:'20px' }}>
-          <div style={{ fontSize:'11px', color:'#8a9bb5', textTransform:'uppercase', letterSpacing:'0.8px', marginBottom:'16px', fontWeight:600 }}>🎯 Top Maßnahmen (höchster ROI)</div>
-          {recs.slice(0,3).map((r,i) => {
-            const col = actionColors[r.action_type] || '#8a9bb5'
-            return (
-              <div key={i} style={{ background:'#1a2233', border:'1px solid #2a3d5a', borderRadius:'10px', padding:'14px', marginBottom:'10px', display:'flex', gap:'14px' }}>
-                <div style={{ width:'50px', minWidth:'50px', height:'50px', borderRadius:'10px', background:col+'22', border:`1px solid ${col}44`, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center' }}>
-                  {/* ROI: ohne Kosten gibt es keinen Faktor – dann „0 €“ Kosten statt „∞“ */}
-                  <div style={{ fontSize:'13px', fontWeight:700, fontFamily:'monospace', color:col }}>{r.roi === null ? '0 €' : r.roi.toLocaleString('de-DE') + 'x'}</div>
-                  <div style={{ fontSize:'9px', color:'#8a9bb5' }}>{r.roi === null ? 'Kosten' : 'ROI'}</div>
-                </div>
-                <div style={{ flex:1 }}>
-                  <div style={{ fontSize:'13px', fontWeight:600, color:'#fff', marginBottom:'4px' }}>{r.title}</div>
-                  <div style={{ fontSize:'11px', color:'#8a9bb5', marginBottom:'8px' }}>{r.description}</div>
-                  <div style={{ display:'flex', gap:'16px', fontSize:'11px', fontFamily:'monospace' }}>
-                    <span style={{ color:'#f87171' }}>{r.estimated_cost.toLocaleString('de-DE')} € Kosten</span>
-                    <span style={{ color:'#34d399' }}>{r.estimated_potential.toLocaleString('de-DE')} € Potenzial</span>
-                  </div>
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      </div>
+      <Card className="mt-8" title="Entwicklung"
+        lead={o.series.available ? 'Aus dem Bestelldatum jeder einzelnen Bestellung.' : o.periods.length > 1 ? 'Je importiertem Zeitraum, umgerechnet auf einen Tag.' : undefined}
+        actions={<div className="flex flex-wrap gap-2">
+          <SegmentedControl<'revenue' | 'orders'> label="Kennzahl" value={metric} onChange={setMetric} options={[{ value: 'revenue', label: 'Umsatz' }, { value: 'orders', label: 'Bestellungen' }]} />
+          {o.series.available && <SegmentedControl<'daily' | 'weekly' | 'monthly'> label="Zeitraster" value={grain} onChange={setGrain} options={[{ value: 'daily', label: 'Tage' }, { value: 'weekly', label: 'Wochen' }, { value: 'monthly', label: 'Monate' }]} />}
+        </div>}>
+        {o.series.available
+          ? <Chart data={series.map(s => ({ label: s.label, value: metric === 'revenue' ? s.revenue : s.orders }))} valueKey={metric === 'revenue' ? 'Umsatz' : 'Bestellungen'} unit={metric === 'revenue' ? '€' : ''} />
+          : o.periods.filter(p => p.days).length > 1
+            ? <>
+                <Chart data={o.periods.filter(p => p.days).map(p => ({ label: p.label, value: metric === 'revenue' ? p.revenue_per_day! : p.orders_per_day! }))} valueKey={metric === 'revenue' ? 'Umsatz je Tag' : 'Bestellungen je Tag'} unit={metric === 'revenue' ? '€' : ''} />
+                <p className="mt-3 text-[12.5px] text-ink-muted">{o.series.reason}</p>
+              </>
+            : <Notice>{o.series.reason} {o.periods.length < 2 && 'Ein Vergleich von Zeiträumen ist ab dem zweiten Import möglich.'}</Notice>}
+      </Card>
 
-      {/* PLZ Tabelle */}
-      {plzData.length > 0 && (
-        <div style={{ background:'#111827', border:'1px solid #1f2d45', borderRadius:'12px', padding:'20px' }}>
-          <div style={{ fontSize:'11px', color:'#8a9bb5', textTransform:'uppercase', letterSpacing:'0.8px', marginBottom:'16px', fontWeight:600 }}>🗺️ Marktdurchdringung je PLZ-Gebiet</div>
-          <div style={{ overflowX:'auto' }}>
-            <table style={{ width:'100%', borderCollapse:'collapse', fontSize:'13px' }}>
-              <thead>
-                <tr style={{ borderBottom:'1px solid #1f2d45' }}>
-                  {['PLZ','Kunden','Bestellungen','Umsatz','Einwohner','Marktanteil','Nicht erreicht'].map((h,i) => (
-                    <th key={h} style={{ textAlign: i===0?'left':'right', fontSize:'11px', color:'#4a5a70', paddingBottom:'10px', fontWeight:600, textTransform:'uppercase', letterSpacing:'0.5px' }}>{h}</th>
-                  ))}
+      <Card className="mt-4" pad={false} title="Liefergebiete nach Postleitzahl"
+        lead="Sortiert nach Umsatz. Einwohnerzahlen nur, wo sie aus dem Zensus 2022 belegt sind."
+        actions={<Link href="/plz" className="link text-[13.5px]">Details</Link>}>
+        <div className="table-wrap">
+          <table className="table">
+            <thead><tr>
+              <th>PLZ</th><th className="r">Umsatz</th><th className="r">Anteil</th><th className="r">Bestellungen</th><th className="r">Bestellwert</th><th className="r">Kunden</th><th className="r">Einwohner</th>
+              <th>Bestellungen je 1.000 Einwohner<InfoTip label="Bestellungen je 1.000 Einwohner">Bestellungen im gesamten Datenzeitraum, geteilt durch die Einwohnerzahl, mal 1.000. So lassen sich große und kleine Gebiete vergleichen. Ohne belegte Einwohnerzahl bleibt das Feld leer.</InfoTip></th>
+              <th className="r">Straßen ohne Bestellung</th>
+            </tr></thead>
+            <tbody>
+              {o.plz.map(p => (
+                <tr key={p.postal_code}>
+                  <td><Link href={`/streets?plz=${p.postal_code}`} className="link num">{p.postal_code}</Link>{p.city && <span className="ml-2 text-ink-muted">{p.city}</span>}</td>
+                  <td className="r">{fmtEur(p.revenue)}</td>
+                  <td className="r text-ink-muted">{fmtPct(p.revenue_share_pct)}</td>
+                  <td className="r">{fmtInt(p.orders)}</td>
+                  <td className="r">{fmtEur(p.avg_order_value, 2)}</td>
+                  <td className="r">{fmtInt(p.customers)}</td>
+                  <td className="r">{fmtInt(p.population)}</td>
+                  <td>
+                    {p.orders_per_1000 === null ? <span className="text-ink-muted">—</span> : (
+                      <div className="flex items-center gap-2">
+                        <span className="num w-12 text-right">{fmtNum(p.orders_per_1000)}</span>
+                        <span className="h-2 w-28 overflow-hidden rounded-full bg-sunken" aria-hidden><span className="block h-full rounded-full bg-accent" style={{ width: `${maxRate ? Math.max(3, p.orders_per_1000 / maxRate * 100) : 0}%` }} /></span>
+                      </div>
+                    )}
+                  </td>
+                  <td className="r">{p.streets_without_orders === null ? <span className="text-ink-muted">—</span> : <>{fmtInt(p.streets_without_orders)} <span className="text-ink-muted">von {fmtInt(p.streets_total)}</span></>}</td>
                 </tr>
-              </thead>
-              <tbody>
-                {plzData.map(p => {
-                  // Keine Ampelfarbe: Was ein guter Marktanteil ist, hängt von der Branche ab
-                  const mc = p.market_penetration_pct === null ? '#4a5a70' : '#c8d3e6'
-                  return (
-                    <tr key={p.postal_code}>
-                      <td style={{ textAlign:'left', padding:'10px 0', borderBottom:'1px solid rgba(31,45,69,0.5)', fontFamily:'monospace', color:'#e63027', fontWeight:600 }}>{p.postal_code}</td>
-                      <td style={{ textAlign:'right', padding:'10px 0', borderBottom:'1px solid rgba(31,45,69,0.5)', fontFamily:'monospace' }}>{p.customer_count}</td>
-                      <td style={{ textAlign:'right', padding:'10px 0', borderBottom:'1px solid rgba(31,45,69,0.5)', fontFamily:'monospace' }}>{p.order_count}</td>
-                      <td style={{ textAlign:'right', padding:'10px 0', borderBottom:'1px solid rgba(31,45,69,0.5)', fontFamily:'monospace' }}>{p.revenue.toFixed(0)} €</td>
-                      <td style={{ textAlign:'right', padding:'10px 0', borderBottom:'1px solid rgba(31,45,69,0.5)', fontFamily:'monospace', color:'#8a9bb5' }}>{p.population ? p.population.toLocaleString('de-DE'):'—'}</td>
-                      <td style={{ textAlign:'right', padding:'10px 0', borderBottom:'1px solid rgba(31,45,69,0.5)', fontFamily:'monospace', color:mc, fontWeight:700 }}>{p.market_penetration_pct !== null ? `${p.market_penetration_pct.toFixed(2)}%` : '—'}</td>
-                      <td style={{ textAlign:'right', padding:'10px 0', borderBottom:'1px solid rgba(31,45,69,0.5)', fontFamily:'monospace', color:'#f87171' }}>{p.not_reached_residents ? p.not_reached_residents.toLocaleString('de-DE'):'—'}</td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
+              ))}
+            </tbody>
+          </table>
         </div>
-      )}
+      </Card>
+
+      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+        <Card pad={false} title="Straßen mit dem meisten Umsatz">
+          <div className="table-wrap"><table className="table">
+            <thead><tr><th>Straße</th><th>PLZ</th><th className="r">Umsatz</th><th className="r">Bestellungen</th></tr></thead>
+            <tbody>{o.streets.top.slice(0, 8).map(s => (
+              <tr key={s.postal_code + s.street_name}><td>{s.street_name}</td><td className="num text-ink-muted">{s.postal_code}</td><td className="r">{fmtEur(s.revenue)}</td><td className="r">{fmtInt(s.orders)}</td></tr>
+            ))}</tbody>
+          </table></div>
+        </Card>
+        {c?.comparable && declining.length > 0 ? (
+          <Card pad={false} title="Straßen mit Rückgang" lead={`${c.previous.label} gegenüber ${c.current.label}, je 30 Tage.`}>
+            <div className="table-wrap"><table className="table">
+              <thead><tr><th>Straße</th><th>PLZ</th><th className="r">vorher</th><th className="r">zuletzt</th><th className="r">Veränderung</th></tr></thead>
+              <tbody>{declining.map(s => (
+                <tr key={s.postal_code + s.street_name}><td>{s.street_name}</td><td className="num text-ink-muted">{s.postal_code}</td><td className="r">{fmtNum(s.previous_per_30d)}</td><td className="r">{fmtNum(s.current_per_30d)}</td><td className="r text-bad">{fmtNum(s.change_pct)} %</td></tr>
+              ))}</tbody>
+            </table></div>
+          </Card>
+        ) : (
+          <Card pad={false} title="Straßen mit wenig Bestellungen" lead="Straßen, aus denen bestellt wurde, aber selten.">
+            <div className="table-wrap"><table className="table">
+              <thead><tr><th>Straße</th><th>PLZ</th><th className="r">Bestellungen</th><th className="r">Umsatz</th></tr></thead>
+              <tbody>{o.streets.lowest_with_orders.slice(0, 8).map(s => (
+                <tr key={s.postal_code + s.street_name}><td>{s.street_name}</td><td className="num text-ink-muted">{s.postal_code}</td><td className="r">{fmtInt(s.orders)}</td><td className="r">{fmtEur(s.revenue)}</td></tr>
+              ))}</tbody>
+            </table></div>
+          </Card>
+        )}
+      </div>
     </div>
   )
 }

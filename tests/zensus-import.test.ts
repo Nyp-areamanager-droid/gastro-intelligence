@@ -65,6 +65,8 @@ describe('Importprogramm (Ende-zu-Ende mit künstlichen Dateien)', () => {
     const sq = (lon: number, lat: number, d = 0.01) => [[[lon - d, lat - d], [lon + d, lat - d], [lon + d, lat + d], [lon - d, lat + d], [lon - d, lat - d]]]
     writeFileSync(join(dir, 'plz.geojson'), JSON.stringify({ type: 'FeatureCollection', features: [
       { type: 'Feature', properties: { postal_code: '33333' }, geometry: { type: 'Polygon', coordinates: sq(10, 52) } },
+      // Zweite Fläche derselben PLZ (kommt in OSM vor, z. B. 75378): darf nicht doppelt zählen
+      { type: 'Feature', properties: { postal_code: '33333' }, geometry: { type: 'Polygon', coordinates: sq(10.5, 52.5, 0.001) } },
     ] }))
     writeFileSync(join(dir, 'ew.csv'), 'GITTER_ID_100m;x_mp_100m;y_mp_100m;Einwohner\nA;4321050;3210050;100\nB;4321150;3210050;23\nC;4321250;3210050;–\nD;4500050;3300050;50\n')
     writeFileSync(join(dir, 'hh.csv'), 'GITTER_ID_100m;x_mp_100m;y_mp_100m;Insgesamt\nA;4321050;3210050;48\nB;4321150;3210050;11\n')
@@ -75,5 +77,7 @@ describe('Importprogramm (Ende-zu-Ende mit künstlichen Dateien)', () => {
     expect(sql).toMatch(/^-- Einwohner\/Haushalte je PLZ aus Zensus 2022/)
     expect(sql.trim().endsWith('COMMIT;')).toBe(true)
     expect(readFileSync(join(dir, 'out.csv'), 'utf8')).toContain('33333;123;3;1;59;0')
+    expect(sql.match(/VALUES \('33333'/g)).toHaveLength(1)
+    expect(readFileSync(join(dir, 'out.csv'), 'utf8').match(/^33333;/gm)).toHaveLength(1)
   }, 60000)
 })

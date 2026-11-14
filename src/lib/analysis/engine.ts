@@ -83,6 +83,9 @@ export function detectColumns(headers: string[]): Record<string, string> {
     ['phone',         ['telefon','phone','mobile','handy','rufnummer','mobilnummer','tel.']],
     ['first_name',    ['vorname','firstname','first name','given name']],
     ['last_name',     ['nachname','lastname','last name','surname','familienname']],
+    // E-Mail wird erkannt, damit die Spalte nicht versehentlich einem anderen
+    // Feld zugeordnet wird – gespeichert wird sie nie
+    ['email',         ['e-mail','email','mail']],
     ['street',        ['straße','strasse','street','adresse','adress','road']],
     ['house_number',  ['hausnummer','hnr','house number','nr.','number']],
     ['postal_code',   ['plz','postleitzahl','zip','postal','postcode']],
@@ -132,17 +135,59 @@ export function detectColumns(headers: string[]): Record<string, string> {
 
 // ── Datenbereinigung & Parsing ────────────────────────────────────────────────
 
+export interface ImportProblem { row: number; reason: string }
+const MAX_PROBLEMS = 500
+
+/** Felder, die der Nutzer einer Spalte zuordnen kann (Reihenfolge = Anzeige). */
+export const IMPORT_FIELDS: { field: string; label: string; required?: boolean; note?: string }[] = [
+  { field: 'postal_code', label: 'Postleitzahl', required: true },
+  { field: 'street', label: 'Straße (mit oder ohne Hausnummer)' },
+  { field: 'house_number', label: 'Hausnummer' },
+  { field: 'city', label: 'Ort' },
+  { field: 'total_orders', label: 'Anzahl Bestellungen', note: 'Fehlt die Spalte, zählt jede Zeile als eine Bestellung.' },
+  { field: 'total_revenue', label: 'Umsatz' },
+  { field: 'last_order_date', label: 'Bestelldatum bzw. letztes Bestelldatum' },
+  { field: 'customer_ref', label: 'Kundennummer', note: 'Zum Wiedererkennen desselben Kunden.' },
+  { field: 'order_ref', label: 'Bestellnummer' },
+  { field: 'phone', label: 'Telefon', note: 'Wird nicht gespeichert, nur ein daraus berechnetes Kennzeichen.' },
+  { field: 'platform', label: 'Bestellweg / Plattform' },
+  { field: 'store', label: 'Standort / Filiale' },
+  { field: 'customer_count', label: 'Anzahl Kunden (bei Summen je Straße)' },
+  { field: 'avg_order_value', label: 'Durchschnittlicher Bestellwert' },
+  { field: 'late_deliveries', label: 'Verspätete Lieferungen' },
+  { field: 'is_vip', label: 'Stammkunden-Kennzeichen' },
+]
+
+/** Zuordnung des Nutzers über die automatische Erkennung legen (nur gültige Felder und vorhandene Spalten). */
+export function applyMappingOverride(detected: Record<string, string>, override: unknown, headers: string[]): Record<string, string> {
+  if (!override || typeof override !== 'object') return detected
+  const allowed = new Set(IMPORT_FIELDS.map(f => f.field))
+  const out = { ...detected }
+  for (const [field, header] of Object.entries(override as Record<string, unknown>)) {
+    if (!allowed.has(field)) continue
+    if (header === null || header === '') { delete out[field]; continue }
+    if (typeof header !== 'string' || !headers.includes(header)) continue
+    for (const k of Object.keys(out)) if (out[k] === header && k !== field) delete out[k]   // eine Spalte, ein Feld
+    out[field] = header
+  }
+  return out
+}
+
 export function parseAndCleanRows(
   rawRows: Record<string, unknown>[],
-  columnMapping: Record<string, string>
-): { rows: ParsedCustomerRow[]; duplicates: number; errors: number; invalid_values: number } {
+  columnMapping: Record<string, string>,
+  options: { allowMissingPostalCode?: boolean } = {},
+): { rows: ParsedCustomerRow[]; duplicates: number; errors: number; invalid_values: number; invalid_dates: number; problems: ImportProblem[] } {
   const seen = new Set<string>()
+  // Fehlerbericht: Zeilennummer wie in der Datei (Kopfzeile = Zeile 1)
+  const problems: ImportProblem[] = []
   const result: ParsedCustomerRow[] = []
   let duplicates = 0
   let errors = 0
   // Zeilen mit unlesbaren Zahlen (z. B. Umsatz „abc“): werden übernommen, der
   // Wert zählt als 0 bzw. 1 Bestellung – aber das wird jetzt gemeldet
   let invalidValues = 0
+  let invalidDates = 0
 
   for (let i = 0; i < rawRows.length; i++) {
     const row = rawRows[i]
@@ -169,10 +214,8 @@ export function parseAndCleanRows(
     // Kundennummer aus dem Kassensystem (nur zur Wiedererkennung)
     parsed.customer_ref = get('customer_ref') || undefined
 
-    // Name
-    parsed.first_name = get('first_name') || undefined
-    parsed.last_name = get('last_name') || undefined
-    parsed.full_name = [parsed.first_name, parsed.last_name].filter(Boolean).join(' ') || undefined
+    // Namen und E-Mail-Adressen werden bewusst NICHT übernommen
+    // (Datenminimierung, siehe lib/privacy/pseudonym.ts)
 
     // Adresse
     const streetRaw = get('street')
@@ -192,9 +235,15 @@ export function parseAndCleanRows(
       : get('postal_code').replace(/\D/g, '')
     if (plzRaw && validatePLZ(plzRaw)) {
       parsed.postal_code = plzRaw
+    } else if (options.allowMissingPostalCode && !get('postal_code') && parsed.street && get('city')) {
+      // PLZ fehlt ganz, Straße und Ort sind da: Die Adresszuordnung versucht,
+      // die PLZ eindeutig zu bestimmen (lib/geo/address-match.ts). Gelingt das
+      // nicht, wird die Zeile dort aussortiert und gemeldet.
+      parsed._needs_postal_code = true
     } else {
       parsed._errors.push(`Ungültige PLZ: "${get('postal_code')}"`)
       errors++
+      if (problems.length < MAX_PROBLEMS) problems.push({ row: i + 2, reason: get('postal_code') ? `Ungültige Postleitzahl „${get('postal_code')}“ – Zeile nicht übernommen` : 'Postleitzahl fehlt – Zeile nicht übernommen' })
       continue
     }
 
@@ -213,6 +262,7 @@ export function parseAndCleanRows(
     if (invalid) {
       parsed._errors.push('Unlesbarer Zahlenwert bei Bestellungen oder Umsatz')
       invalidValues++
+      if (problems.length < MAX_PROBLEMS) problems.push({ row: i + 2, reason: 'Zahl bei Bestellungen oder Umsatz nicht lesbar – Zeile übernommen, der Wert zählt als 0 bzw. 1 Bestellung' })
     }
 
     const bonRaw = parseLocaleNumber(get('avg_order_value'))
@@ -222,7 +272,13 @@ export function parseAndCleanRows(
 
     // Datum
     const dateRaw = get('last_order_date')
-    if (dateRaw) parsed.last_order_date = parseDateString(dateRaw)
+    if (dateRaw) {
+      parsed.last_order_date = parseDateString(dateRaw)
+      if (!parsed.last_order_date) {
+        invalidDates++
+        if (problems.length < MAX_PROBLEMS) problems.push({ row: i + 2, reason: `Datum „${dateRaw.slice(0, 30)}“ ist nicht lesbar – Zeile wird ohne Datum übernommen` })
+      }
+    }
 
     // Platform
     parsed.platform = get('platform') || undefined
@@ -256,6 +312,7 @@ export function parseAndCleanRows(
       const dupKey = Object.keys(columnMapping).sort().map(f => get(f)).join('\u0001')
       if (seen.has(dupKey)) {
         duplicates++
+        if (problems.length < MAX_PROBLEMS) problems.push({ row: i + 2, reason: 'Zeile ist in allen Spalten identisch mit einer früheren Zeile – als doppelt nicht übernommen' })
         continue
       }
       seen.add(dupKey)
@@ -264,35 +321,43 @@ export function parseAndCleanRows(
     result.push(parsed)
   }
 
-  return { rows: result, duplicates, errors, invalid_values: invalidValues }
+  return { rows: result, duplicates, errors, invalid_values: invalidValues, invalid_dates: invalidDates, problems }
 }
 
-function parseDateString(raw: string): string | undefined {
-  // Unterstützt: DD.MM.YYYY, YYYY-MM-DD, MM/DD/YYYY
-  const cleaned = raw.trim()
-  const patterns = [
-    /^(\d{2})\.(\d{2})\.(\d{4})$/, // DE
-    /^(\d{4})-(\d{2})-(\d{2})$/,   // ISO
-    /^(\d{2})\/(\d{2})\/(\d{4})$/,  // US
-  ]
-  for (const pat of patterns) {
-    const m = cleaned.match(pat)
-    if (m) {
-      try {
-        const date = pat === patterns[0]
-          ? new Date(`${m[3]}-${m[2]}-${m[1]}`)
-          : pat === patterns[2]
-          ? new Date(`${m[3]}-${m[1]}-${m[2]}`)
-          : new Date(cleaned)
-        if (!isNaN(date.getTime())) return date.toISOString().split('T')[0]
-      } catch { continue }
-    }
+/**
+ * Datum aus einer Importzelle → JJJJ-MM-TT.
+ * Unterstützt: TT.MM.JJJJ (auch T.M.JJ), JJJJ-MM-TT, MM/TT/JJJJ, jeweils auch
+ * mit angehängter Uhrzeit, sowie die Excel-Seriennummer.
+ *
+ * Bewusst ohne `new Date(text)`: Das liest „01.07.2026“ als 7. Januar
+ * (amerikanische Reihenfolge) und hängt von der Zeitzone des Servers ab.
+ * Jedes Format wird einzeln zerlegt und auf ein echtes Kalenderdatum geprüft.
+ */
+export function parseDateString(raw: string): string | undefined {
+  const cleaned = String(raw ?? '').trim()
+  if (!cleaned) return undefined
+  const build = (y: number, m: number, d: number): string | undefined => {
+    if (y < 100) y += 2000
+    if (y < 1990 || y > 2100 || m < 1 || m > 12 || d < 1 || d > 31) return undefined
+    const date = new Date(Date.UTC(y, m - 1, d))
+    // 31.02. usw. abweisen (Date würde stillschweigend in den März rutschen)
+    if (date.getUTCFullYear() !== y || date.getUTCMonth() !== m - 1 || date.getUTCDate() !== d) return undefined
+    return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`
   }
-  // Excel-Seriennummer
-  const serial = parseFloat(cleaned)
-  if (!isNaN(serial) && serial > 40000) {
-    const date = new Date((serial - 25569) * 86400 * 1000)
-    return date.toISOString().split('T')[0]
+  const TIME = '(?:[ T]\\d{1,2}:\\d{2}(?::\\d{2})?(?:\\.\\d+)?(?:Z|[+-]\\d{2}:?\\d{2})?)?'
+  let m = cleaned.match(new RegExp(`^(\\d{1,2})\\.(\\d{1,2})\\.(\\d{4}|\\d{2})${TIME}$`))
+  if (m) return build(+m[3], +m[2], +m[1])                     // deutsch: Tag.Monat.Jahr
+  m = cleaned.match(new RegExp(`^(\\d{4})-(\\d{1,2})-(\\d{1,2})${TIME}$`))
+  if (m) return build(+m[1], +m[2], +m[3])                     // ISO: Jahr-Monat-Tag
+  m = cleaned.match(new RegExp(`^(\\d{1,2})/(\\d{1,2})/(\\d{4})${TIME}$`))
+  if (m) return build(+m[3], +m[1], +m[2])                     // amerikanisch: Monat/Tag/Jahr
+  // Excel-Seriennummer (Tage seit 30.12.1899), nur reine Zahlen
+  if (/^\d{5}(\.\d+)?$/.test(cleaned)) {
+    const serial = parseFloat(cleaned)
+    if (serial > 32874 && serial < 73051) {                    // 1990 bis 2099
+      const date = new Date(Math.floor(serial - 25569) * 86400 * 1000)
+      return date.toISOString().slice(0, 10)
+    }
   }
   return undefined
 }
@@ -657,7 +722,11 @@ export function generateAlerts(
     current.late_delivery_pct, 5)
 
   // VIP-Rate
-  if (current.vip_rate_pct < 1) add('critical', 'vip',
+  // Nur wenn die Daten überhaupt Stammkunden-Kennzeichen enthalten. Ohne eine
+  // solche Spalte ist die Quote immer 0 – das ist dann keine Aussage über den
+  // Betrieb und darf keine Warnung auslösen.
+  if (current.vip_rate_pct <= 0) { /* keine Daten → keine Warnung */ }
+  else if (current.vip_rate_pct < 1) add('critical', 'vip',
     'Kritisch: VIP-Programm inaktiv',
     `Nur ${current.vip_rate_pct}% VIP-Nutzer. Das Treueprogramm ist faktisch unbekannt.`,
     current.vip_rate_pct, 5)

@@ -9,6 +9,11 @@
 // =============================================================================
 
 import * as XLSX from 'xlsx'
+import { MAX_DATA_ROWS } from './upload-checks'
+
+// Kopfzeile + Höchstzahl + 1: So lässt sich erkennen, dass es mehr Zeilen
+// sind, ohne eine riesige Datei vollständig auszupacken.
+const SHEET_ROWS = MAX_DATA_ROWS + 2
 
 export function isCsvFile(name: string, type: string): boolean {
   return /\.(csv|txt)$/i.test(name) || /^text\/(csv|plain)/i.test(type)
@@ -27,10 +32,10 @@ export function readWorkbook(buffer: ArrayBuffer, name: string, type: string): X
   if (isCsvFile(name, type)) {
     // raw: true → Werte bleiben Text. Sonst liest die Bibliothek "143,91" als 14391
     // (Komma als Tausendertrenner). Zahlen und Daten wandelt parseAndCleanRows selbst um.
-    return XLSX.read(decodeCsv(buffer), { type: 'string', raw: true })
+    return XLSX.read(decodeCsv(buffer), { type: 'string', raw: true, sheetRows: SHEET_ROWS })
   }
   // Kein cellDates: Datumszellen kommen als Excel-Seriennummer und werden in
   // parseAndCleanRows exakt (UTC) umgerechnet. Mit cellDates entstehen Date-Objekte,
   // die als Text nicht mehr erkannt wurden (Datum ging verloren).
-  return XLSX.read(buffer, { type: 'array' })
+  return XLSX.read(buffer, { type: 'array', sheetRows: SHEET_ROWS })
 }

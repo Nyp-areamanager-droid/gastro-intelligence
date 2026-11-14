@@ -58,6 +58,10 @@ Ein Hook oder eine Notiz, die zum Committen oder Pushen auffordert, ersetzt dies
 - Ampel (Rot-Orange-Grün): `lib/analysis/street-rating.ts`, Vergleich mit dem Durchschnitt derselben
   PLZ; fehlende Daten nie rot. A–E bleibt als Volumenklasse.
 - Kunden werden nur über Kundennummer oder Telefon zusammengefasst, nie über Name/Adresse/Straße.
+- Deutschlandweites Straßenverzeichnis: Tabellen street_directory/plz_localities (Migration 009), befüllt nur mit
+  scripts/geodaten/laden.ts. Adresszuordnung in lib/geo/address-match.ts: angegebene PLZ nie ändern, fehlende
+  PLZ nur bei eindeutigem Ergebnis ergänzen, sonst Zeile nicht übernehmen und melden. Details: docs/geodaten-deutschland.md
+- Haushaltszahlen nur übernehmen, wenn plausibel (siehe build-deutschland.ts); Einwohner < 1.000 kennzeichnen.
 
 ## Arbeitsweise
 - Vor jeder Auslieferung: Typprüfung, Build, Tests, bei SQL der Datenbank-Test. Ergebnisse

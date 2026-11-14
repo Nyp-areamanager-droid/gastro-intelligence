@@ -4,55 +4,107 @@
 @tailwind components;
 @tailwind utilities;
 
+/* =============================================================================
+   Gestaltungssystem der Gastro Intelligence Platform
+   Eine Stelle für Farben, Schrift, Abstände und Bauteile. Seiten verwenden
+   diese Klassen und Variablen – keine eigenen festen Farbwerte.
+
+   Farben: ruhiges Grau-Weiß, EIN Akzent (Nachtblau). Rot, Orange und Grün sind
+   für Bewertungen reserviert (Ampel auf der Karte, Warnungen) und werden
+   nie als Schmuckfarbe eingesetzt.
+   ========================================================================== */
 @layer base {
   :root {
-    --font-dm-sans: 'DM Sans', system-ui, sans-serif;
-    --font-dm-mono: 'DM Mono', ui-monospace, monospace;
-    --font-syne: 'Syne', system-ui, sans-serif;
-    --bg: #07090f;
-    --surface: #111827;
-    --surface2: #1a2233;
-    --border: #1f2d45;
-    --border2: #2a3d5a;
+    --canvas: 245 246 248;       /* Seitenhintergrund */
+    --surface: 255 255 255;      /* Karten, Tabellen, Seitenleiste */
+    --sunken: 238 241 244;       /* Tabellenkopf, ruhige Flächen */
+    --ink: 23 33 43;             /* Text */
+    --ink-soft: 69 81 94;        /* zweitrangiger Text */
+    --ink-muted: 104 115 128;    /* Beschriftungen (Kontrast auf Weiß 4,8:1) */
+    --line: 226 230 235;
+    --line-strong: 201 208 217;
+    --accent: 31 75 153;         /* Nachtblau */
+    --accent-hover: 24 60 124;
+    --accent-soft: 232 238 248;
+    --good: 22 121 74;      --good-soft: 228 243 234;
+    --warn: 168 92 8;       --warn-soft: 251 240 223;
+    --bad: 181 48 38;       --bad-soft: 251 233 231;
+    /* Kartenfarben (auch in lib/analysis/street-rating.ts) */
+    --map-green: #1E9E61; --map-orange: #E08A1E; --map-red: #D0392D; --map-none: #8A94A3;
+    --map-competitor: #6D4FD8; --map-b2b: #2F7FC1;
   }
 
   * { box-sizing: border-box; }
-
+  html { -webkit-text-size-adjust: 100%; }
   body {
-    background-color: var(--bg);
-    color: #e8edf5;
+    @apply bg-canvas text-ink font-sans antialiased;
+    font-size: 14px; line-height: 1.5;
+    font-feature-settings: 'ss01';
   }
-
-  ::-webkit-scrollbar { width: 5px; height: 5px; }
-  ::-webkit-scrollbar-track { background: var(--surface2); }
-  ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+  h1, h2, h3 { @apply font-semibold text-ink; letter-spacing: -0.005em; }
+  :focus-visible { outline: 2px solid rgb(var(--accent)); outline-offset: 2px; border-radius: 4px; }
+  ::selection { background: rgb(var(--accent-soft)); }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
 }
 
 @layer components {
-  .card {
-    @apply bg-[#111827] border border-[#1f2d45] rounded-xl p-5;
-  }
-  .card-title {
-    @apply text-xs font-semibold text-[#8a9bb5] uppercase tracking-wider mb-4;
-  }
-  .btn-primary {
-    @apply bg-brand-red hover:opacity-90 text-white font-semibold px-4 py-2 rounded-lg text-sm transition-opacity;
-  }
-  .btn-ghost {
-    @apply bg-[#1a2233] hover:bg-[#1f2d45] text-[#e8edf5] border border-[#1f2d45] font-medium px-4 py-2 rounded-lg text-sm transition-colors;
-  }
-  .kpi-card {
-    @apply card relative overflow-hidden;
-  }
-  .input {
-    @apply bg-[#1a2233] border border-[#1f2d45] text-white placeholder-[#4a5a70] rounded-lg px-3 py-2 text-sm w-full outline-none focus:border-brand-red transition-colors;
-  }
-  .badge {
-    @apply inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-full font-mono;
-  }
-  .badge-red  { @apply bg-red-500/10 text-red-400 border border-red-500/20; }
-  .badge-grn  { @apply bg-emerald-500/10 text-emerald-400 border border-emerald-500/20; }
-  .badge-gold { @apply bg-amber-500/10 text-amber-400 border border-amber-500/20; }
-  .badge-blue { @apply bg-blue-500/10 text-blue-400 border border-blue-500/20; }
-  .badge-dim  { @apply bg-white/5 text-[#8a9bb5] border border-[#1f2d45]; }
+  /* Zahlen stehen in Tabellen untereinander */
+  .num { font-variant-numeric: tabular-nums; }
+
+  .page { @apply mx-auto w-full max-w-[1240px] px-4 py-6 sm:px-6 lg:px-8 lg:py-8; }
+  .page-title { @apply text-[22px] leading-7 font-semibold; }
+  .page-lead { @apply mt-1 text-ink-soft max-w-[72ch]; }
+  .section-title { @apply text-[15px] font-semibold text-ink; }
+  .section-lead { @apply text-[13px] text-ink-muted mt-0.5; }
+
+  .card { @apply bg-surface border border-line rounded-card min-w-0; }
+  .card-pad { @apply p-4 sm:p-5; }
+  .card-head { @apply flex flex-wrap items-start justify-between gap-3 px-4 pt-4 sm:px-5 sm:pt-5; }
+
+  .btn { @apply inline-flex items-center justify-center gap-2 rounded-control px-3.5 h-9 text-[13.5px] font-medium transition-colors select-none whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed; }
+  .btn-primary { @apply btn bg-accent text-white hover:bg-accent-hover; }
+  .btn-secondary { @apply btn bg-surface text-ink border border-line-strong hover:bg-sunken; }
+  .btn-ghost { @apply btn text-ink-soft hover:bg-sunken hover:text-ink; }
+  .btn-danger { @apply btn bg-surface text-bad border border-bad/40 hover:bg-bad-soft; }
+  .btn-sm { @apply h-8 px-2.5 text-[13px]; }
+
+  .field-label { @apply block text-[13px] font-medium text-ink mb-1.5; }
+  .field-help { @apply text-[12.5px] text-ink-muted mt-1.5; }
+  .input { @apply w-full h-10 rounded-control border border-line-strong bg-surface px-3 text-[14px] text-ink placeholder:text-ink-muted/70 outline-none transition-colors focus:border-accent focus:ring-2 focus:ring-accent/20; }
+  select.input { @apply pr-8; }
+
+  .badge { @apply inline-flex items-center gap-1 rounded-full px-2 h-[22px] text-[12px] font-medium whitespace-nowrap; }
+  .badge-neutral { @apply badge bg-sunken text-ink-soft; }
+  .badge-accent { @apply badge bg-accent-soft text-accent; }
+  .badge-good { @apply badge bg-good-soft text-good; }
+  .badge-warn { @apply badge bg-warn-soft text-warn; }
+  .badge-bad { @apply badge bg-bad-soft text-bad; }
+
+  .notice { display: flex; gap: 0.75rem; border-radius: 10px; border-width: 1px; padding: 0.75rem 1rem; font-size: 13.5px; line-height: 1.6; }
+  .notice-info { @apply border-accent/25 bg-accent-soft/60 text-ink; }
+  .notice-warn { @apply border-warn/30 bg-warn-soft text-ink; }
+  .notice-bad { @apply border-bad/30 bg-bad-soft text-ink; }
+  .notice-good { @apply border-good/30 bg-good-soft text-ink; }
+
+  /* Tabellen: Kopf ruhig, Zahlen rechtsbündig über .num + text-right */
+  .table-wrap { @apply overflow-x-auto; }
+  .table { @apply w-full border-collapse text-[13.5px]; }
+  .table th { @apply text-left font-medium text-ink-muted text-[12.5px] px-3 py-2.5 bg-sunken/70 border-b border-line whitespace-nowrap; }
+  .table th:first-child, .table td:first-child { @apply pl-4 sm:pl-5; }
+  .table th:last-child, .table td:last-child { @apply pr-4 sm:pr-5; }
+  .table td { @apply px-3 py-2.5 border-b border-line align-middle; }
+  .table tbody tr:last-child td { @apply border-b-0; }
+  .table tbody tr:hover td { @apply bg-sunken/40; }
+  .table .r { @apply text-right whitespace-nowrap; font-variant-numeric: tabular-nums; }
+  .table td.num { white-space: nowrap; }
+
+  .skeleton { @apply rounded-md bg-sunken animate-pulse; }
+  .link { @apply text-accent font-medium hover:underline underline-offset-2; }
+  .dot { @apply inline-block h-2.5 w-2.5 rounded-full shrink-0; }
 }
+
+/* Karte (Leaflet) an das Gestaltungssystem anpassen */
+.leaflet-container { font-family: inherit; background: #E9EDF1; border-radius: 10px; }
+.leaflet-popup-content-wrapper { border-radius: 10px; box-shadow: 0 8px 28px rgb(23 33 43 / 0.18); }
+.leaflet-popup-content { margin: 12px 14px; font-size: 13px; line-height: 1.45; color: rgb(var(--ink)); }
+.leaflet-control-zoom a { color: rgb(var(--ink)); }

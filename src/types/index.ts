@@ -422,6 +422,10 @@ export interface ParsedCustomerRow {
   rfm_score?: number
   rfm_segment?: RFMSegment
   _row_index: number
+  /** PLZ fehlte in der Datei; wird von der Adresszuordnung ergänzt oder die Zeile aussortiert */
+  _needs_postal_code?: boolean
+  /** Ergebnis der Adresszuordnung (lib/geo/address-match.ts) */
+  geo_status?: import('@/lib/geo/address-match').GeoStatus
   _errors: string[]
   /** Gesetzt wenn die Zeile bereits aggregierte Straßendaten enthält
    *  (kein Einzelkunde, sondern Summe mehrerer Kunden je Straße). */

@@ -1,9 +1,10 @@
+import { rateLimit, tooManyRequests } from '@/lib/security/rate-limit'
 import { NextRequest, NextResponse } from 'next/server'
 import * as XLSX from 'xlsx'
 import { createServerSupabaseClient, createReferenceDataClient } from '@/lib/supabase/server'
-import { resolveCompanyContext, canWriteCompanyData, sanitizeStorageFileName } from '@/lib/auth/company-context'
+import { resolveCompanyContext, canWriteCompanyData } from '@/lib/auth/company-context'
 import {
-  detectColumns, parseAndCleanRows, computeRFM,
+  detectColumns, applyMappingOverride, IMPORT_FIELDS, parseAndCleanRows, computeRFM,
   computeDashboardKPIs, generateAlerts, generateRecommendations,
   analyzeStreets, analyzePLZ,
 } from '@/lib/analysis/engine'
@@ -16,7 +17,16 @@ import {
   parseImportMode, parsePeriodDate, fileFingerprint, decideImport, overlapShare,
   rowFingerprint, mergeCustomers, SAME_DATA_SHARE, type ExistingUpload,
 } from '@/lib/import/import-guard'
+import { checkRequestSize, checkUploadFile, checkPlzCount, checkRowCount } from '@/lib/import/upload-checks'
+import { minimizeRow, pseudonymizePhone } from '@/lib/privacy/pseudonym'
+import { customerRecordToRow } from '@/lib/analysis/customer-record'
+import { directoryAvailable, loadAddressIndex, loadStreetsForPlz } from '@/lib/geo/directory'
+import { assignRows } from '@/lib/geo/assign-rows'
+
+/** Kennzeichen in uploads.storage_path: Für diesen Import liegt keine Datei im Speicher. */
+const NOT_STORED_MARKER = 'nicht-gespeichert'
 import type { ParsedCustomerRow } from '@/types'
+import type { Json } from '@/lib/supabase/database.types'
 
 export const maxDuration = 60 // Vercel: max 60s für Pro plan
 
@@ -25,7 +35,7 @@ export async function POST(req: NextRequest) {
   // Die Firma kommt ausschließlich aus der Sitzung. Alle Firmendaten (Datei,
   // Upload, Kunden, Analysen) werden mit DIESER Sitzung geschrieben, die
   // RLS-Regeln greifen also zusätzlich zur Prüfung hier.
-  const supabase = createServerSupabaseClient()
+  const supabase = await createServerSupabaseClient()
   const auth = await resolveCompanyContext(supabase)
   if (auth.ok === false) {
     return NextResponse.json({ error: auth.error }, { status: auth.status })
@@ -37,8 +47,18 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Keine Berechtigung zum Importieren von Daten' }, { status: 403 })
   }
 
+  // Missbrauchsschutz: höchstens 40 Aufrufe (Vorschau + Import) je Nutzer in 10 Minuten
+  const limited = rateLimit(`upload:${userId}`, 40, 600_000)
+  if (!limited.ok) { const t = tooManyRequests(limited); return NextResponse.json(t.body, t.init) }
+
   // Service-Key nur für gemeinsame Referenzdaten (PLZ, Straßenverzeichnis)
   const reference = createReferenceDataClient()
+
+  // Zu große Anfragen gar nicht erst einlesen
+  const tooLarge = checkRequestSize(req.headers.get('content-length'))
+  if (tooLarge && tooLarge.ok === false) {
+    return NextResponse.json({ error: tooLarge.error }, { status: tooLarge.status })
+  }
 
   try {
     const formData = await req.formData()
@@ -47,7 +67,7 @@ export async function POST(req: NextRequest) {
     const storeIdRaw = formData.get('store_id') as string | null
     const storeId = storeIdRaw && storeIdRaw.trim() ? storeIdRaw.trim() : null
 
-    if (!file) {
+    if (!file || typeof file === 'string' || typeof (file as File).arrayBuffer !== 'function') {
       return NextResponse.json({ error: 'Datei erforderlich' }, { status: 400 })
     }
 
@@ -77,29 +97,76 @@ export async function POST(req: NextRequest) {
       end: parsePeriodDate(formData.get('period_end')),
     }
     const fileBuffer = await file.arrayBuffer()
+    // Größe, Endung und Inhalt prüfen, bevor die Datei gelesen wird
+    const fileCheck = checkUploadFile(file.name, file.size, new Uint8Array(fileBuffer))
+    if (fileCheck.ok === false) {
+      return NextResponse.json({ error: fileCheck.error }, { status: fileCheck.status })
+    }
     const fileHash = fileFingerprint(fileBuffer)
 
-    const workbook = readWorkbook(fileBuffer, file.name, file.type)
-    const worksheet = workbook.Sheets[workbook.SheetNames[0]]
-    const rawRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: '' })
+    let rawRows: Record<string, unknown>[]
+    try {
+      const workbook = readWorkbook(fileBuffer, file.name, fileCheck.contentType)
+      const worksheet = workbook.Sheets[workbook.SheetNames[0]]
+      rawRows = worksheet ? XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: '' }) : []
+    } catch {
+      return NextResponse.json({ error: 'Die Datei konnte nicht gelesen werden. Bitte die Datei direkt aus Excel oder dem Kassensystem exportieren und erneut hochladen.' }, { status: 422 })
+    }
+    const tooManyRows = checkRowCount(rawRows.length)
+    if (tooManyRows && tooManyRows.ok === false) {
+      return NextResponse.json({ error: tooManyRows.error }, { status: tooManyRows.status })
+    }
 
     if (!rawRows.length) {
       return NextResponse.json({ error: 'Die Datei enthält keine Datenzeilen, nur eine Kopfzeile oder gar nichts.' }, { status: 400 })
     }
 
     const headers = Object.keys(rawRows[0])
-    const columnMapping = detectColumns(headers)
-    if (!columnMapping.postal_code) {
+    // Automatische Erkennung, vom Nutzer in der Vorschau korrigierbar
+    let mappingOverride: unknown = null
+    try { mappingOverride = JSON.parse(String(formData.get('mapping') || 'null')) } catch { mappingOverride = null }
+    const columnMapping = applyMappingOverride(detectColumns(headers), mappingOverride, headers)
+    // Deutschlandweites Straßenverzeichnis (Migration 009) vorhanden? Dann
+    // werden Adressen geprüft und fehlende PLZ – wenn eindeutig – ergänzt.
+    const hasDirectory = await directoryAvailable(supabase)
+    const canInferPlz = hasDirectory && !!columnMapping.street && !!columnMapping.city
+    if (!columnMapping.postal_code && !canInferPlz && formData.get('preview') === '1') {
+      // Vorschau: Der Nutzer kann die Spalten selbst zuordnen
+      return NextResponse.json({
+        preview: true, needs_mapping: true, filename: file.name, headers, mapping: columnMapping, fields: IMPORT_FIELDS,
+        message: hasDirectory
+          ? 'In der Datei wurde keine Spalte mit Postleitzahlen erkannt. Bitte ordnen Sie die Spalte mit der Postleitzahl zu – oder Straße und Ort, dann wird die PLZ wo möglich ergänzt.'
+          : 'In der Datei wurde keine Spalte mit Postleitzahlen erkannt. Bitte ordnen Sie die Spalte mit der Postleitzahl zu.',
+      })
+    }
+    if (!columnMapping.postal_code && !canInferPlz) {
       return NextResponse.json({
         error: 'In der Datei wurde keine Spalte mit Postleitzahlen gefunden. Bitte eine Spalte „PLZ“ ergänzen und erneut hochladen.',
         headers, detected: columnMapping,
       }, { status: 422 })
     }
 
-    const { rows: cleanedRows, duplicates, errors, invalid_values: invalidValues } = parseAndCleanRows(rawRows, columnMapping)
+    const parsed = parseAndCleanRows(rawRows, columnMapping, { allowMissingPostalCode: hasDirectory })
+    const { rows: parsedRows, duplicates, invalid_values: invalidValues, invalid_dates: invalidDates, problems } = parsed
+    // Datenminimierung: keine Namen, keine Telefonnummern im Klartext
+    const minimizedRows = parsedRows.map(r => minimizeRow(companyId, r))
+    // Adressen gegen das Straßenverzeichnis prüfen; PLZ nur eindeutig ergänzen
+    const loadedDirectory = hasDirectory
+      ? await loadAddressIndex(supabase, minimizedRows.map(r => ({ postal_code: r._needs_postal_code ? null : r.postal_code, city: r.city })))
+      : null
+    const geo = assignRows(minimizedRows, loadedDirectory?.index ?? null, loadedDirectory?.version ?? null)
+    const errors = parsed.errors + geo.dropped
+    problems.push(...geo.problems)
+    problems.sort((a, b) => a.row - b.row)
+    const cleanedRows = geo.rows
     const rowsWithRFM = computeRFM(cleanedRows)
     if (!rowsWithRFM.length) {
       return NextResponse.json({ error: 'Keine Zeile der Datei hatte eine gültige Postleitzahl. Es wurde nichts importiert.' }, { status: 422 })
+    }
+
+    const tooManyPlz = checkPlzCount(new Set(rowsWithRFM.map(r => r.postal_code)).size)
+    if (tooManyPlz && tooManyPlz.ok === false) {
+      return NextResponse.json({ error: tooManyPlz.error }, { status: tooManyPlz.status })
     }
 
     // Zeitraum: Angabe des Nutzers, sonst aus den Bestelldaten der Datei
@@ -117,6 +184,36 @@ export async function POST(req: NextRequest) {
     const { data: existingUploads, error: existingError } = await existingQuery
     if (existingError) {
       return NextResponse.json({ error: 'Bisherige Uploads konnten nicht geprüft werden. Bitte versuchen Sie es erneut.' }, { status: 500 })
+    }
+
+    // ── Vorschau: nichts speichern, nur zeigen, was der Import tun würde ──────
+    if (formData.get('preview') === '1') {
+      const sameFile = (existingUploads || []).find(u => u.file_hash && u.file_hash === fileHash)
+      const usedHeaders = new Set(Object.values(columnMapping))
+      return NextResponse.json({
+        preview: true,
+        filename: file.name,
+        headers,
+        mapping: columnMapping,
+        fields: IMPORT_FIELDS,
+        unused_headers: headers.filter(h => !usedHeaders.has(h)),
+        // Spalten mit Personendaten, die erkannt, aber nicht gespeichert werden
+        not_stored: ['first_name', 'last_name', 'email'].filter(f => columnMapping[f]).map(f => columnMapping[f]),
+        phone_pseudonymized: !!columnMapping.phone,
+        order_level: !columnMapping.total_orders && !columnMapping.customer_count && !!columnMapping.last_order_date,
+        counts: { rows_in_file: rawRows.length, rows_valid: rowsWithRFM.length, rows_skipped: errors, duplicates, invalid_values: invalidValues, invalid_dates: invalidDates, postal_codes: new Set(rowsWithRFM.map(r => r.postal_code)).size },
+        totals: {
+          orders: rowsWithRFM.reduce((s2, r) => s2 + r.total_orders, 0),
+          revenue: Math.round(rowsWithRFM.reduce((s2, r) => s2 + r.total_revenue, 0) * 100) / 100,
+        },
+        period: { start: periodStart, end: periodEnd, from_file: !userPeriod.start && !userPeriod.end },
+        // Beispielzeilen so, wie sie gespeichert würden (ohne Namen, ohne Telefonnummer)
+        sample: rowsWithRFM.slice(0, 5).map(r => ({ postal_code: r.postal_code, city: r.city || null, street: r.street || null, house_number: r.house_number || null, total_orders: r.total_orders, total_revenue: r.total_revenue, last_order_date: r.last_order_date || null, customer_ref: r.customer_ref || null, has_phone_mark: !!r.phone_normalized, platform: r.platform || null })),
+        problems: problems.slice(0, 200), problems_total: errors + duplicates + invalidValues + invalidDates + (geo.summary ? geo.summary.by_status.plz_pruefen + geo.summary.by_status.plz_unbekannt : 0),
+        geo: geo.summary,
+        existing: { has_data: (existingUploads || []).length > 0, same_file: sameFile ? { filename: sameFile.filename, uploaded_at: sameFile.created_at } : null,
+          last_period_end: ((existingUploads || []).map(u => u.period_end).filter(Boolean).sort().reverse()[0] as string | undefined) || null },
+      })
     }
 
     const decision = decideImport({
@@ -138,7 +235,7 @@ export async function POST(req: NextRequest) {
       if (rowsError) {
         return NextResponse.json({ error: 'Bisherige Daten konnten nicht geprüft werden. Bitte versuchen Sie es erneut.' }, { status: 500 })
       }
-      const share = overlapShare(rowsWithRFM.map(rowFingerprint), (existingRows || []).map(rowFingerprint))
+      const share = overlapShare(rowsWithRFM.map(rowFingerprint), (existingRows || []).map(e => rowFingerprint({ ...e, phone_normalized: pseudonymizePhone(companyId, e.phone_normalized) })))
       if (share >= SAME_DATA_SHARE) {
         return NextResponse.json({
           code: 'append_same_data',
@@ -147,15 +244,11 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ── 3. Datei in Supabase Storage speichern ───────────────────────────────
-    const storagePath = `${companyId}/${Date.now()}_${sanitizeStorageFileName(file.name)}`
-    const { error: storageError } = await supabase.storage
-      .from('uploads')
-      .upload(storagePath, fileBuffer, { contentType: file.type })
-    if (storageError) {
-      console.error('Storage-Upload fehlgeschlagen:', storageError.message)
-      return NextResponse.json({ error: 'Die Datei konnte nicht gespeichert werden. Bitte versuchen Sie es erneut.' }, { status: 500 })
-    }
+    // ── 3. Die Originaldatei wird NICHT gespeichert ──────────────────────────
+    // Sie kann Namen, Telefonnummern und E-Mail-Adressen enthalten. Gespeichert
+    // werden nur die bereinigten Zeilen (ohne diese Angaben). Für die Prüfung
+    // „dieselbe Datei schon importiert?“ genügt der Fingerabdruck (file_hash).
+    const storagePath = NOT_STORED_MARKER
 
     // ── 4. Upload-Datensatz erstellen ────────────────────────────────────────
     const { data: upload, error: uploadError } = await supabase
@@ -167,7 +260,7 @@ export async function POST(req: NextRequest) {
         filename: file.name,
         storage_path: storagePath,
         file_size_bytes: file.size,
-        file_type: file.type,
+        file_type: fileCheck.contentType,
         status: 'processing',
         file_hash: fileHash,
         import_mode: decision.action,
@@ -196,11 +289,8 @@ export async function POST(req: NextRequest) {
         store_id: storeId || null,
         upload_id: upload.id,
         customer_ref: r.customer_ref || null,
+        // nur das Kennzeichen der Telefonnummer; phone_raw und Namen bleiben leer
         phone_normalized: r.phone_normalized || null,
-        phone_raw: r.phone_raw || null,
-        first_name: r.first_name || null,
-        last_name: r.last_name || null,
-        full_name: r.full_name || null,
         street: r.street || null,
         street_normalized: r.street_normalized || null,
         house_number: r.house_number || null,
@@ -215,6 +305,8 @@ export async function POST(req: NextRequest) {
         is_vip: r.is_vip || false,
         platform: r.platform || null,
         late_deliveries: r.late_deliveries || 0,
+        // Spalte gibt es erst ab Migration 009 – nur mitsenden, wenn das Verzeichnis (also 009) da ist
+        ...(loadedDirectory ? { geo_status: r.geo_status || null } : {}),
       }))
       const { error: insertError } = await supabase.from('customers').insert(records)
       if (insertError) {
@@ -247,7 +339,7 @@ export async function POST(req: NextRequest) {
     }
     const allRows = mergeCustomers([
       ...rowsWithRFM,
-      ...(otherCustomers || []).map(customerRecordToRow),
+      ...(otherCustomers || []).map(c => customerRecordToRow(c, companyId)),
     ])
 
     const plzGroups = new Map<string, ParsedCustomerRow[]>()
@@ -271,6 +363,12 @@ export async function POST(req: NextRequest) {
       .single()
 
     const orchestrator = new DataProviderOrchestrator(company?.google_places_api_key || undefined)
+    // Straßenlisten aller betroffenen PLZ (auch aus früheren Importen) aus dem Verzeichnis
+    const directoryStreets = new Map(loadedDirectory?.streets || [])
+    if (loadedDirectory) {
+      const missingPlz = [...plzGroups.keys()].filter(p => !directoryStreets.has(p))
+      for (const [p, list] of await loadStreetsForPlz(supabase, missingPlz)) directoryStreets.set(p, list)
+    }
     const plzAnalyses = []
     const allStreetResults: ReturnType<typeof analyzeStreets> = []
 
@@ -278,11 +376,16 @@ export async function POST(req: NextRequest) {
       // Straßenverzeichnis live laden (vollständig oder ausdrücklich unvollständig).
       // Der gespeicherte Straßen-Cache wird hier bewusst NICHT gelesen: Er hat
       // keine Kennzeichnung, ob er vollständig ist (siehe Konzept, neue Tabelle).
-      const streetDir = await orchestrator.getStreets(plz)
+      // Vorrang: deutschlandweites Verzeichnis aus der Datenbank (vollständig je
+      // PLZ laut Quelle). Nur wenn die PLZ dort fehlt: Live-Abruf wie bisher.
+      const fromDirectory = directoryStreets.get(plz)
+      const streetDir = fromDirectory
+        ? { streets: fromDirectory, complete: true, status: 'complete' as const, source: 'openplz' as const, count: fromDirectory.length, error: undefined }
+        : await orchestrator.getStreets(plz)
       const directory = { streets: streetDir.streets, complete: streetDir.complete }
 
-      // Nur vollständige Listen speichern
-      if (streetDir.complete) {
+      // Nur vollständige Listen aus dem Live-Abruf speichern (Verzeichnis ist schon da)
+      if (streetDir.complete && !fromDirectory) {
         const plzInfo = await orchestrator.getPostalCodeData(plz)
         await reference.from('postal_codes').upsert({
           postal_code: plz,
@@ -427,6 +530,7 @@ export async function POST(req: NextRequest) {
       period_start: periodStart,
       period_end: periodEnd,
       processed_at: new Date().toISOString(),
+      ...(loadedDirectory ? { geo_summary: JSON.parse(JSON.stringify(geo.summary)) as Json } : {}),
     }).eq('id', upload.id)
 
     return NextResponse.json({
@@ -439,9 +543,12 @@ export async function POST(req: NextRequest) {
         valid_rows: rowsWithRFM.length,
         duplicate_rows: duplicates,
         error_rows: errors,
+        problems: problems.slice(0, 200),
         invalid_value_rows: invalidValues,
+        invalid_date_rows: invalidDates,
         unique_plz: new Set(rowsWithRFM.map(r => r.postal_code)).size,
         period: { start: periodStart, end: periodEnd },
+        geo: geo.summary,
       },
       totals: {
         customers: kpis.total_customers,
@@ -461,21 +568,4 @@ export async function POST(req: NextRequest) {
       { status: 500 }
     )
   }
-}
-
-/** Gespeicherter Kundendatensatz → Analyse-Zeile */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function customerRecordToRow(c: any): ParsedCustomerRow {
-  return {
-    _row_index: 0, _errors: [],
-    customer_ref: c.customer_ref || undefined,
-    phone_normalized: c.phone_normalized || undefined, phone_raw: c.phone_raw || undefined,
-    first_name: c.first_name || undefined, last_name: c.last_name || undefined, full_name: c.full_name || undefined,
-    street: c.street || undefined, street_normalized: c.street_normalized || undefined, house_number: c.house_number || undefined,
-    postal_code: c.postal_code, city: c.city || undefined,
-    total_orders: c.total_orders ?? 1, total_revenue: Number(c.total_revenue ?? 0),
-    avg_order_value: c.avg_order_value ?? undefined, last_order_date: c.last_order_date || undefined,
-    rfm_segment: c.rfm_segment || undefined, rfm_score: c.rfm_score || undefined,
-    is_vip: !!c.is_vip, platform: c.platform || undefined, late_deliveries: c.late_deliveries || 0,
-  } as ParsedCustomerRow
 }

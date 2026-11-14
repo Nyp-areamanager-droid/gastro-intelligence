@@ -1,25 +1,21 @@
-import type { Metadata } from 'next'
+import type { Metadata, Viewport } from 'next'
+// Schrift liegt im Projekt (kein Abruf bei Google: schneller und ohne
+// Übermittlung der IP-Adresse der Nutzer an Dritte)
+import '@fontsource/ibm-plex-sans/latin-400.css'
+import '@fontsource/ibm-plex-sans/latin-500.css'
+import '@fontsource/ibm-plex-sans/latin-600.css'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'Gastro Intelligence Platform',
-  description: 'Deutschlandweite Analyse-Plattform für Gastronomie & Lieferdienste',
+  title: { default: 'Gastro Intelligence', template: '%s – Gastro Intelligence' },
+  description: 'Liefergebiete verstehen: Bestellungen nach Straße und Postleitzahl auswerten.',
 }
+export const viewport: Viewport = { width: 'device-width', initialScale: 1, themeColor: '#F5F6F8' }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="de" className="dark">
-      <head>
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-        <link
-          href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@100..1000&family=DM+Mono:wght@400;500&family=Syne:wght@700;800&display=swap"
-          rel="stylesheet"
-        />
-      </head>
-      <body className="font-sans bg-brand-dark text-white antialiased">
-        {children}
-      </body>
+    <html lang="de">
+      <body>{children}</body>
     </html>
   )
 }

@@ -3,29 +3,26 @@ import { createServerSupabaseClient } from '@/lib/supabase/server'
 import { analyzePLZ, analyzeStreets } from '@/lib/analysis/engine'
 import { DataProviderOrchestrator } from '@/lib/providers'
 import { fetchAllRows } from '@/lib/supabase/fetch-all'
+import { resolveCompanyContext } from '@/lib/auth/company-context'
+import { rateLimit, tooManyRequests } from '@/lib/security/rate-limit'
+import { verifiedPopulation } from '@/lib/geo/population'
+import { mergeCustomers } from '@/lib/analysis/merge-customers'
+import { customerRecordToRow } from '@/lib/analysis/customer-record'
 
 // GET /api/analysis/plz?plz=51063&upload_id=xxx
 export async function GET(req: NextRequest) {
-  const supabase = createServerSupabaseClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) return NextResponse.json({ error: 'Nicht authentifiziert' }, { status: 401 })
+  const supabase = await createServerSupabaseClient()
+  const auth = await resolveCompanyContext(supabase)
+  if (auth.ok === false) return NextResponse.json({ error: auth.error }, { status: auth.status })
+  const { companyId, userId } = auth.ctx
 
   const plz = req.nextUrl.searchParams.get('plz')
   const uploadId = req.nextUrl.searchParams.get('upload_id')
-
-  if (!plz) return NextResponse.json({ error: 'PLZ fehlt' }, { status: 400 })
-
-  // Company ID des Users
-  const { data: membership } = await supabase
-    .from('company_users')
-    .select('company_id, companies(google_places_api_key)')
-    .eq('user_id', user.id)
-    .single()
-
-  if (!membership) return NextResponse.json({ error: 'Kein Unternehmen gefunden' }, { status: 403 })
-
-  const companyId = membership.company_id
-  const googleKey = (membership.companies as Record<string,string>)?.google_places_api_key
+  if (!plz || !/^\d{5}$/.test(plz)) return NextResponse.json({ error: 'PLZ fehlt oder ist ungültig' }, { status: 400 })
+  if (uploadId && !/^[0-9a-f-]{36}$/i.test(uploadId)) return NextResponse.json({ error: 'Ungültiger Import' }, { status: 400 })
+  // Jede Anfrage fragt das Straßenverzeichnis ab: bremsen
+  const limited = rateLimit(`plz-analyse:${userId}`, 120, 600_000)
+  if (!limited.ok) { const t = tooManyRequests(limited); return NextResponse.json(t.body, t.init) }
 
   // Kunden für diese PLZ – alle, nicht nur die ersten 1.000
   const { data: customers, error: customersError } = await fetchAllRows((from, to) => {
@@ -44,31 +41,19 @@ export async function GET(req: NextRequest) {
   // Straßenverzeichnis live (vollständig oder ausdrücklich unvollständig).
   // Der Straßen-Cache in der Datenbank hat keine Vollständigkeits-Kennung
   // und wird deshalb nicht als Grundlage für "ohne Bestellungen" genutzt.
-  const orchestrator = new DataProviderOrchestrator(googleKey)
+  const orchestrator = new DataProviderOrchestrator()
   const streetDir = await orchestrator.getStreets(plz)
   const directory = { streets: streetDir.streets, complete: streetDir.complete }
 
-  // Bevölkerungsdaten
-  const { data: plzData } = await supabase.from('postal_codes').select('population, households, city, state').eq('postal_code', plz).single()
+  // Einwohner/Haushalte nur mit belegter Herkunft (Zensus-Import), sonst unbekannt
+  const { data: plzData } = await supabase.from('postal_codes').select('population, households, city, state, population_method, population_reference_date').eq('postal_code', plz).maybeSingle()
+  const { population, households } = verifiedPopulation(plzData)
 
-  // Analyse berechnen
-  const rows = customers.map(c => ({
-    postal_code: c.postal_code,
-    street: c.street,
-    street_normalized: c.street_normalized,
-    city: c.city,
-    total_orders: c.total_orders,
-    total_revenue: c.total_revenue,
-    avg_order_value: c.avg_order_value,
-    last_order_date: c.last_order_date,
-    is_vip: c.is_vip,
-    rfm_segment: c.rfm_segment,
-    late_deliveries: c.late_deliveries,
-    _row_index: 0,
-    _errors: [],
-  }))
+  // Dieselbe Person aus mehreren Zeilen/Importen zählt einmal (Kundennummer
+  // oder Telefon-Kennzeichen) – wie beim Import und in der Übersicht.
+  const rows = mergeCustomers(customers.map(c => customerRecordToRow(c, companyId)))
 
-  const plzAnalysis = analyzePLZ(rows, directory, plzData?.population || null, plzData?.households || null)
+  const plzAnalysis = analyzePLZ(rows, directory, population, households)
   if (!streetDir.complete && streetDir.error) plzAnalysis.warnings.push(`⚠️ ${streetDir.error}`)
   const streetAnalysis = analyzeStreets(rows, directory)
 
