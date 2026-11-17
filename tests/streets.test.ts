@@ -394,6 +394,7 @@ function makeServiceClient() {
       return b
     },
     storage: { from: () => ({ upload: () => Promise.resolve({ error: null }) }) },
+    rpc: () => Promise.resolve({ data: null, error: null }),
     auth: { getUser: () => Promise.resolve({ data: { user: { id: 'u1' } }, error: null }) },
   }
 }

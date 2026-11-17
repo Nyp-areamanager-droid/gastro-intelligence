@@ -36,6 +36,7 @@ function client() {
       return b
     },
     storage: { from: () => ({ upload: (p: string) => { state.storage.push(p); return Promise.resolve({ error: null }) } }) },
+    rpc: () => Promise.resolve({ data: null, error: null }),
     auth: { getUser: () => Promise.resolve({ data: { user: { id: 'u1' } }, error: null }) },
   }
 }

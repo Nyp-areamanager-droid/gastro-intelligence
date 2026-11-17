@@ -356,13 +356,13 @@ export async function POST(req: NextRequest) {
     }
 
     // ── 8. Analyse pro PLZ ───────────────────────────────────────────────────
-    const { data: company } = await supabase
-      .from('companies')
-      .select('google_places_api_key')
-      .eq('id', companyId)
-      .single()
+    // Der Google-Places-Schlüssel ist für die Sitzung nicht direkt lesbar (Migration 011).
+    // Die Datenbankfunktion liefert ihn nur an Inhaber und Admins der eigenen Firma,
+    // sonst null: Der Import läuft dann ohne Google-Places-Anreicherung.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data: placesKey } = await (supabase as any).rpc('get_company_places_key')
 
-    const orchestrator = new DataProviderOrchestrator(company?.google_places_api_key || undefined)
+    const orchestrator = new DataProviderOrchestrator(typeof placesKey === 'string' && placesKey ? placesKey : undefined)
     // Straßenlisten aller betroffenen PLZ (auch aus früheren Importen) aus dem Verzeichnis
     const directoryStreets = new Map(loadedDirectory?.streets || [])
     if (loadedDirectory) {

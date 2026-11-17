@@ -15,6 +15,7 @@ const st = vi.hoisted(() => ({
   serviceCreated: 0,
   serviceCalls: [] as { table: string; ops: [string, unknown[]][] }[],
   cached: [] as Record<string, unknown>[],
+  cachedFresh: true,
   providerCalls: [] as string[],
 }))
 
@@ -40,7 +41,8 @@ vi.mock('@/lib/supabase/server', () => ({
     st.serviceCreated++
     return {
       from: (t: string) => builderFor(t, c => ({
-        data: t === 'poi_businesses' && c.ops.some(([o]) => o === 'select') ? st.cached : null, error: null,
+        data: t === 'poi_businesses' && c.ops.some(([o]) => o === 'select')
+          ? (c.ops.some(([o]) => o === 'gt') && !st.cachedFresh ? [] : st.cached) : null, error: null,
       }), st.serviceCalls),
     }
   },
@@ -78,7 +80,7 @@ const plzReq = (q = '') => new NextRequest(`http://localhost/api/providers/openp
 
 beforeEach(() => {
   st.user = { id: `u${++n}` } // eigene Nutzer-ID je Test: Rate-Limit stört nicht
-  st.role = null; st.serviceCreated = 0; st.serviceCalls = []; st.cached = []; st.providerCalls = []
+  st.role = null; st.serviceCreated = 0; st.serviceCalls = []; st.cached = []; st.cachedFresh = true; st.providerCalls = []
 })
 
 describe('OpenPLZ-Route: Rollen', () => {
@@ -151,6 +153,27 @@ describe('OSM-Route: Rollen', () => {
     expect(body.from_cache).toBe(true)
     expect(st.providerCalls).toEqual([])
     expect(serviceWrites()).toEqual([])
+  })
+
+  it('viewer: auch ältere gespeicherte Daten (über 7 Tage) bleiben lesbar', async () => {
+    st.role = 'viewer'
+    st.cachedFresh = false // Altersfilter der 7-Tage-Prüfung liefert nichts
+    st.cached = [{ postal_code: '50733', name: 'Hotel Alt', category: 'hotel' }]
+    const { GET } = await import('@/app/api/providers/osm/route')
+    const body = await (await GET(osmReq())).json()
+    expect(body.count).toBe(1)
+    expect(st.providerCalls).toEqual([])
+    expect(serviceWrites()).toEqual([])
+  })
+
+  it('manager: veraltete Daten (über 7 Tage) werden neu geladen, wie bisher', async () => {
+    st.role = 'manager'
+    st.cachedFresh = false
+    st.cached = [{ postal_code: '50733', name: 'Hotel Alt', category: 'hotel' }]
+    const { GET } = await import('@/app/api/providers/osm/route')
+    const body = await (await GET(osmReq())).json()
+    expect(body.from_cache).toBe(false)
+    expect(st.providerCalls).toContain('osm-pois')
   })
 
   it('viewer: ohne gespeicherte Daten kein Abruf und kein Schreiben, verständlicher Hinweis', async () => {

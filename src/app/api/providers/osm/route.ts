@@ -55,7 +55,15 @@ export async function GET(req: NextRequest) {
   }
 
   // Viewer dürfen nur lesen: kein Abruf bei OpenStreetMap, nichts wird geschrieben.
+  // Gespeicherte Einträge zeigen sie auch dann, wenn sie älter als 7 Tage sind.
   if (!canWriteCompanyData(auth.ctx)) {
+    const { data: stored } = await supabase.from('poi_businesses').select('*').eq('postal_code', plz)
+    if (stored && stored.length > 0) {
+      return NextResponse.json({
+        plz, pois: stored, count: stored.length, from_cache: true, read_only: true,
+        categories_loaded: Array.from(new Set(stored.map(p => p.category as string))),
+      })
+    }
     return NextResponse.json({
       plz, pois: [], count: 0, from_cache: false, read_only: true,
       warning: `Für PLZ ${plz} liegen noch keine OpenStreetMap-Daten vor. Das Laden ist Mitgliedern mit Schreibrecht vorbehalten (Inhaber, Admin, Manager).`,
