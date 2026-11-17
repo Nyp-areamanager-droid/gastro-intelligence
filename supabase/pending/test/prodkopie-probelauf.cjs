@@ -49,16 +49,20 @@ const lines = async c => (await c.query(`SELECT x FROM (
 
   // ── Ausgangslage aus der echten Sicherung ──
   // Hinweis: Die Sicherung wurde mit --no-acl erstellt. Die Tabellenrechte sind darin NICHT enthalten und werden hier mit den
-  // Supabase-Standardrechten nachgebildet (anon/authenticated/service_role: alle Rechte). Das ist eine Annahme, die vor Produktion
-  // mit einer Nur-Lesen-Abfrage gegen die echte Datenbank bestätigt werden muss (supabase/pending/check_rechte_produktion.sql).
+  // Supabase-Standardrechten nachgebildet (anon/authenticated/service_role: alle Rechte). Bestätigt durch die Nur-Lesen-Abfrage
+  // supabase/pending/check_rechte_produktion.sql gegen Produktion am 17.11.2026 (alle 12 Tabellen: anon/authenticated/service_role alle Rechte).
   await c.query(`GRANT USAGE ON SCHEMA public, auth, storage TO anon, authenticated, service_role;
     GRANT ALL ON ALL TABLES IN SCHEMA public TO anon, authenticated, service_role; GRANT ALL ON ALL TABLES IN SCHEMA storage TO anon, authenticated, service_role;
     GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated, service_role;
     GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public, auth, storage TO anon, authenticated, service_role;
     ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO anon, authenticated, service_role;
     ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO anon, authenticated, service_role;`)
+  // Wie in Produktion (Abfrage vom 17.11.): public.spatial_ref_sys gehört supabase_admin (PostGIS), anon/authenticated/service_role haben alle Rechte, PUBLIC SELECT.
+  // PostGIS gibt es lokal nicht; die Tabelle wird nachgebildet, damit 012 auf einer fremden Tabelle geprüft wird.
+  await c.query(`CREATE TABLE public.spatial_ref_sys (srid integer PRIMARY KEY); ALTER TABLE public.spatial_ref_sys OWNER TO supabase_admin;
+    GRANT ALL ON public.spatial_ref_sys TO anon, authenticated, service_role; GRANT SELECT ON public.spatial_ref_sys TO PUBLIC;`)
   const hasTrg = (await c.query(`SELECT count(*)::int n FROM pg_trigger WHERE tgrelid='auth.users'::regclass AND NOT tgisinternal`)).rows[0].n
-  note(`Auslöser auf auth.users in der Sicherung: ${hasTrg} (pg_dump sichert Auslöser im Schema auth nicht zuverlässig – vor Produktion in Produktion nachsehen)`)
+  note(`Auslöser auf auth.users in der Sicherung: ${hasTrg} (Abfrage B in Produktion am 17.11.2026: ebenfalls keiner; die Funktion on_auth_user_created ist nicht angehängt)`)
   const s0 = await snap(c), lines0 = await lines(c), rights0 = await rights(c)
   const e = (await c.query(`SELECT (SELECT count(*)::int FROM companies) f, (SELECT count(*)::int FROM company_users) m, (SELECT count(*)::int FROM customers) k, (SELECT count(*)::int FROM uploads) u, (SELECT count(*)::int FROM storage.objects) o,
     (SELECT count(*)::int FROM customers WHERE phone_normalized IS NOT NULL) tel, (SELECT count(DISTINCT phone_normalized)::int FROM customers) teld, (SELECT count(*)::int FROM customers WHERE full_name IS NOT NULL OR first_name IS NOT NULL) nam`)).rows[0]
@@ -81,6 +85,7 @@ const lines = async c => (await c.query(`SELECT x FROM (
     ok(`12 ${f.slice(0, 3)}: Kunden: Anzahl, Bestellungen, Umsätze unverändert`, s.customers.n === s0.customers.n && s.customers.o === s0.customers.o && String(s.customers.s) === String(s0.customers.s))
     prev = s
   }
+  ok('13 012 lässt die PostGIS-Tabelle spatial_ref_sys (fremder Besitzer) unberührt', (await c.query(`SELECT has_table_privilege('anon','public.spatial_ref_sys','DELETE') a, has_table_privilege('authenticated','public.spatial_ref_sys','SELECT') b`)).rows[0].a === true)
   // 007: Wirkung auf die echten Daten
   const k7 = (await c.query(`SELECT count(*)::int n, count(*) FILTER (WHERE phone_normalized LIKE 'p1:%')::int p, count(*) FILTER (WHERE phone_raw IS NOT NULL OR first_name IS NOT NULL OR last_name IS NOT NULL OR full_name IS NOT NULL)::int kl, count(DISTINCT phone_normalized)::int d FROM customers`)).rows[0]
   ok('20 007: Telefonnummern pseudonymisiert, Namen/Klartext-Nummern gelöscht, Anzahl verschiedener Kunden gleich geblieben', k7.n === e.k && k7.p === e.tel && k7.kl === 0 && k7.d === e.teld, JSON.stringify(k7))

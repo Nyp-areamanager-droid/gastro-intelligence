@@ -48,6 +48,7 @@ INSERT INTO migration_backup.m012_acl (tabelle, ebene, spalte, grantee, privileg
 SELECT c.relname, 'tabelle', '', a.grantee::regrole::text, a.privilege_type, a.is_grantable
 FROM pg_class c, LATERAL aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
 WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'p') AND c.relname <> 'companies'
+  AND c.relowner = current_user::regrole
   AND a.grantee IN ('anon'::regrole, 'authenticated'::regrole)
   AND NOT EXISTS (SELECT 1 FROM migration_backup.m012_acl)
 UNION ALL
@@ -55,6 +56,7 @@ SELECT c.relname, 'spalte', at.attname, a.grantee::regrole::text, a.privilege_ty
 FROM pg_class c JOIN pg_attribute at ON at.attrelid = c.oid AND at.attnum > 0 AND NOT at.attisdropped AND at.attacl IS NOT NULL,
      LATERAL aclexplode(at.attacl) a
 WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'p') AND c.relname <> 'companies'
+  AND c.relowner = current_user::regrole
   AND a.grantee IN ('anon'::regrole, 'authenticated'::regrole)
   AND NOT EXISTS (SELECT 1 FROM migration_backup.m012_acl)
 UNION ALL
@@ -66,11 +68,13 @@ WHERE d.defaclnamespace = 'public'::regnamespace AND d.defaclobjtype = 'r'
   AND NOT EXISTS (SELECT 1 FROM migration_backup.m012_acl);
 
 -- 2. Alles entziehen (außer companies), dann gezielt vergeben --------------------
+-- Nur Tabellen, die der ausführenden Rolle gehören: Erweiterungstabellen wie public.spatial_ref_sys (PostGIS, Besitzer supabase_admin)
+-- sind nicht Teil der App; ein REVOKE darauf würde in Produktion scheitern oder die Selbstprüfung auslösen.
 DO $rights$
 DECLARE t record;
 BEGIN
   FOR t IN SELECT relname FROM pg_class
-           WHERE relnamespace = 'public'::regnamespace AND relkind IN ('r', 'p') AND relname <> 'companies' LOOP
+           WHERE relnamespace = 'public'::regnamespace AND relkind IN ('r', 'p') AND relname <> 'companies' AND relowner = current_user::regrole LOOP
     EXECUTE format('REVOKE ALL ON public.%I FROM anon, authenticated', t.relname);
   END LOOP;
 END
@@ -89,7 +93,7 @@ DECLARE t record; p text;
   verboten text[] := ARRAY['TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN'];
 BEGIN
   FOR t IN SELECT relname FROM pg_class
-           WHERE relnamespace = 'public'::regnamespace AND relkind IN ('r', 'p') AND relname <> 'companies' LOOP
+           WHERE relnamespace = 'public'::regnamespace AND relkind IN ('r', 'p') AND relname <> 'companies' AND relowner = current_user::regrole LOOP
     IF EXISTS (SELECT 1 FROM pg_class c, LATERAL aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
                WHERE c.oid = format('public.%I', t.relname)::regclass AND a.grantee = 'anon'::regrole)
        OR EXISTS (SELECT 1 FROM pg_attribute at, LATERAL aclexplode(at.attacl) a

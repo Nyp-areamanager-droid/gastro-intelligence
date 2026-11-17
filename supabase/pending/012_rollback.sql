@@ -12,7 +12,7 @@ BEGIN
     RAISE EXCEPTION 'Rückfall 012: keine Sicherung vorhanden';
   END IF;
   FOR t IN SELECT relname FROM pg_class
-           WHERE relnamespace = 'public'::regnamespace AND relkind IN ('r', 'p') AND relname <> 'companies' LOOP
+           WHERE relnamespace = 'public'::regnamespace AND relkind IN ('r', 'p') AND relname <> 'companies' AND relowner = current_user::regrole LOOP
     EXECUTE format('REVOKE ALL ON public.%I FROM anon, authenticated', t.relname);
   END LOOP;
   FOR r IN SELECT * FROM migration_backup.m012_acl WHERE ebene IN ('tabelle', 'spalte')
