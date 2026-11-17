@@ -448,7 +448,7 @@ describe('POST /api/auth/complete-registration', () => {
 
 describe('Provider-Routen – gemeinsame Referenzdaten', () => {
   beforeEach(() => {
-    state.authClient = makeAuthClient({ id: 'u1' }, [{ company_id: 'A', role: 'viewer' }])
+    state.authClient = makeAuthClient({ id: 'u1' }, [{ company_id: 'A', role: 'manager' }])
     state.serviceClient = makeQueryClient(() => ({ data: [], error: null }))
     providerState.osmResults = []
     providerState.census = null

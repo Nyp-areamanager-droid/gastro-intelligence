@@ -1,7 +1,7 @@
 import { rateLimit, tooManyRequests } from '@/lib/security/rate-limit'
 import { NextRequest, NextResponse } from 'next/server'
 import { createServerSupabaseClient, createReferenceDataClient } from '@/lib/supabase/server'
-import { resolveCompanyContext, hasRole, ADMIN_ROLES } from '@/lib/auth/company-context'
+import { resolveCompanyContext, hasRole, canWriteCompanyData, ADMIN_ROLES } from '@/lib/auth/company-context'
 import { osmProvider } from '@/lib/providers'
 import type { POICategory } from '@/types'
 
@@ -9,8 +9,9 @@ const DEFAULT_CATEGORIES = ['restaurant', 'hotel', 'school', 'hospital', 'author
 
 // GET /api/providers/osm?plz=51063&categories=restaurant,hotel,school
 export async function GET(req: NextRequest) {
-  // Nur für eingeloggte Mitglieder einer Firma. Die Route schreibt mit dem
-  // Service-Key in gemeinsame Referenztabellen (keine Firmendaten).
+  // Nur für eingeloggte Mitglieder einer Firma. Lesen (bereits geladene Daten)
+  // dürfen alle Rollen. Laden von OpenStreetMap und Schreiben in die gemeinsamen
+  // Referenztabellen (Service-Key, keine Firmendaten) nur owner, admin, manager.
   const auth = await resolveCompanyContext(await createServerSupabaseClient())
   if (auth.ok === false) {
     return NextResponse.json({ error: auth.error }, { status: auth.status })
@@ -51,6 +52,14 @@ export async function GET(req: NextRequest) {
         from_cache: true, categories_loaded: Array.from(new Set(cached.map(p => p.category as string))),
       })
     }
+  }
+
+  // Viewer dürfen nur lesen: kein Abruf bei OpenStreetMap, nichts wird geschrieben.
+  if (!canWriteCompanyData(auth.ctx)) {
+    return NextResponse.json({
+      plz, pois: [], count: 0, from_cache: false, read_only: true,
+      warning: `Für PLZ ${plz} liegen noch keine OpenStreetMap-Daten vor. Das Laden ist Mitgliedern mit Schreibrecht vorbehalten (Inhaber, Admin, Manager).`,
+    })
   }
 
   // Bounding Box

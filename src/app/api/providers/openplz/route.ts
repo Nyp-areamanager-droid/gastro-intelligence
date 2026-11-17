@@ -1,17 +1,22 @@
 import { rateLimit, tooManyRequests } from '@/lib/security/rate-limit'
 import { NextRequest, NextResponse } from 'next/server'
 import { createServerSupabaseClient, createReferenceDataClient } from '@/lib/supabase/server'
-import { resolveCompanyContext, hasRole, ADMIN_ROLES } from '@/lib/auth/company-context'
+import { resolveCompanyContext, hasRole, canWriteCompanyData, ADMIN_ROLES } from '@/lib/auth/company-context'
 import { openplzProvider } from '@/lib/providers'
 import { invalidateStreetDirectory } from '@/lib/geo/street-directory'
 
 // GET /api/providers/openplz?plz=51063&refresh=false
 export async function GET(req: NextRequest) {
-  // Nur für eingeloggte Mitglieder einer Firma. Die Route schreibt mit dem
-  // Service-Key in gemeinsame Referenztabellen (keine Firmendaten).
+  // Nur für eingeloggte Mitglieder einer Firma mit Schreibrecht (owner, admin,
+  // manager). Die Route lädt von OpenPLZ und schreibt mit dem Service-Key in
+  // gemeinsame Referenztabellen (keine Firmendaten). Viewer dürfen das nicht.
   const auth = await resolveCompanyContext(await createServerSupabaseClient())
   if (auth.ok === false) {
     return NextResponse.json({ error: auth.error }, { status: auth.status })
+  }
+
+  if (!canWriteCompanyData(auth.ctx)) {
+    return NextResponse.json({ error: 'Keine Berechtigung zum Laden von Straßendaten' }, { status: 403 })
   }
 
   // Missbrauchsschutz: höchstens 30 Abrufe je Nutzer und Minute
